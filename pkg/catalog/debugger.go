@@ -3,8 +3,8 @@ package catalog
 import (
 	"time"
 
-	target "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/access/v1alpha2"
-	spec "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/specs/v1alpha3"
+	access "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/access/v1alpha3"
+	spec "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/specs/v1alpha4"
 	split "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/split/v1alpha2"
 
 	"github.com/openservicemesh/osm/pkg/certificate"
@@ -15,60 +15,58 @@ import (
 // ListExpectedProxies lists the Envoy proxies yet to connect and the time their XDS certificate was issued.
 func (mc *MeshCatalog) ListExpectedProxies() map[certificate.CommonName]time.Time {
 	proxies := make(map[certificate.CommonName]time.Time)
-	mc.expectedProxiesLock.Lock()
-	mc.connectedProxiesLock.Lock()
-	mc.disconnectedProxiesLock.Lock()
-	for cn, props := range mc.expectedProxies {
-		if _, ok := mc.connectedProxies[cn]; ok {
-			continue
+
+	mc.expectedProxies.Range(func(cnInterface, expectedProxyInterface interface{}) bool {
+		cn := cnInterface.(certificate.CommonName)
+		props := expectedProxyInterface.(expectedProxy)
+
+		_, isConnected := mc.connectedProxies.Load(cn)
+		_, isDisconnected := mc.disconnectedProxies.Load(cn)
+
+		if !isConnected && !isDisconnected {
+			proxies[cn] = props.certificateIssuedAt
 		}
-		if _, ok := mc.disconnectedProxies[cn]; ok {
-			continue
-		}
-		proxies[cn] = props.certificateIssuedAt
-	}
-	mc.disconnectedProxiesLock.Unlock()
-	mc.connectedProxiesLock.Unlock()
-	mc.expectedProxiesLock.Unlock()
+
+		return true // continue the iteration
+	})
+
 	return proxies
 }
 
 // ListConnectedProxies lists the Envoy proxies already connected and the time they first connected.
 func (mc *MeshCatalog) ListConnectedProxies() map[certificate.CommonName]*envoy.Proxy {
 	proxies := make(map[certificate.CommonName]*envoy.Proxy)
-	mc.connectedProxiesLock.Lock()
-	mc.disconnectedProxiesLock.Lock()
-	for cn, props := range mc.connectedProxies {
-		if _, ok := mc.disconnectedProxies[cn]; ok {
-			continue
+	mc.connectedProxies.Range(func(cnIface, propsIface interface{}) bool {
+		cn := cnIface.(certificate.CommonName)
+		props := propsIface.(connectedProxy)
+		if _, isDisconnected := mc.disconnectedProxies.Load(cn); !isDisconnected {
+			proxies[cn] = props.proxy
 		}
-		proxies[cn] = props.proxy
-	}
-	mc.disconnectedProxiesLock.Unlock()
-	mc.connectedProxiesLock.Unlock()
+		return true // continue the iteration
+	})
 	return proxies
 }
 
 // ListDisconnectedProxies lists the Envoy proxies disconnected and the time last seen.
 func (mc *MeshCatalog) ListDisconnectedProxies() map[certificate.CommonName]time.Time {
 	proxies := make(map[certificate.CommonName]time.Time)
-	mc.disconnectedProxiesLock.Lock()
-	for cn, props := range mc.disconnectedProxies {
+	mc.disconnectedProxies.Range(func(cnInterface, disconnectedProxyInterface interface{}) bool {
+		cn := cnInterface.(certificate.CommonName)
+		props := disconnectedProxyInterface.(disconnectedProxy)
 		proxies[cn] = props.lastSeen
-	}
-	mc.disconnectedProxiesLock.Unlock()
+		return true // continue the iteration
+	})
 	return proxies
 }
 
 // ListSMIPolicies returns all policies OSM is aware of.
-func (mc *MeshCatalog) ListSMIPolicies() ([]*split.TrafficSplit, []service.WeightedService, []service.K8sServiceAccount, []*spec.HTTPRouteGroup, []*target.TrafficTarget) {
+func (mc *MeshCatalog) ListSMIPolicies() ([]*split.TrafficSplit, []service.K8sServiceAccount, []*spec.HTTPRouteGroup, []*access.TrafficTarget) {
 	trafficSplits := mc.meshSpec.ListTrafficSplits()
-	splitServices := mc.meshSpec.ListTrafficSplitServices()
-	serviceAccouns := mc.meshSpec.ListServiceAccounts()
+	serviceAccounts := mc.meshSpec.ListServiceAccounts()
 	trafficSpecs := mc.meshSpec.ListHTTPTrafficSpecs()
 	trafficTargets := mc.meshSpec.ListTrafficTargets()
 
-	return trafficSplits, splitServices, serviceAccouns, trafficSpecs, trafficTargets
+	return trafficSplits, serviceAccounts, trafficSpecs, trafficTargets
 }
 
 // ListMonitoredNamespaces returns all namespaces that the mesh is monitoring.

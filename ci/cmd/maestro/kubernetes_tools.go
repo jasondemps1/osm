@@ -14,10 +14,13 @@ import (
 
 	"github.com/Azure/go-autorest/autorest/to"
 	mapset "github.com/deckarep/golang-set"
+	"helm.sh/helm/v3/pkg/action"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/openservicemesh/osm/pkg/cli"
 )
 
 // We are going to wait for the Pod certain amount of time if it is in one of these statuses
@@ -39,7 +42,7 @@ func GetPodLogs(kubeClient kubernetes.Interface, namespace string, podName strin
 		os.Exit(1)
 	}
 
-	defer logStream.Close()
+	defer logStream.Close() //nolint: errcheck,gosec
 	buf := new(bytes.Buffer)
 	_, err = buf.ReadFrom(logStream)
 	if err != nil {
@@ -48,13 +51,36 @@ func GetPodLogs(kubeClient kubernetes.Interface, namespace string, podName strin
 	return buf.String()
 }
 
-// DeleteNamespaces deletes the namespaces listed.
+// DeleteNamespaces deletes the namespaces listed and any Helm releases within
+// them.
 func DeleteNamespaces(client *kubernetes.Clientset, namespaces ...string) {
+	env := cli.New()
+
 	deleteOptions := metav1.DeleteOptions{
 		GracePeriodSeconds: to.Int64Ptr(0),
 	}
 
 	for _, ns := range namespaces {
+		// Delete all helm releases in the namespace
+		helmCfg := &action.Configuration{}
+		if err := helmCfg.Init(env.RESTClientGetter(), ns, "secret", log.Info().Msgf); err != nil {
+			log.Warn().Err(err).Msg("Failed to initialize Helm, skipping release cleanup")
+		} else {
+			uninstall := action.NewUninstall(helmCfg)
+			list := action.NewList(helmCfg)
+			list.All = true
+			releases, err := list.Run()
+			if err != nil {
+				log.Warn().Err(err).Msgf("Failed to list releases in namespace %s, skipping release cleanup", ns)
+			} else {
+				for _, release := range releases {
+					if _, err := uninstall.Run(release.Name); err != nil {
+						log.Warn().Err(err).Msgf("Failed to uninstall release %s in namespace %s", release.Name, ns)
+					}
+				}
+			}
+		}
+
 		if err := client.CoreV1().Namespaces().Delete(context.Background(), ns, deleteOptions); err != nil {
 			log.Error().Err(err).Msgf("Error deleting namespace %s", ns)
 			continue
@@ -105,7 +131,7 @@ func GetPodName(kubeClient kubernetes.Interface, namespace, selector string) (st
 
 // SearchLogsForSuccess tails logs until success enum is found.
 // The pod/container we are observing is responsible for sending the SUCCESS/FAIL token based on local heuristic.
-func SearchLogsForSuccess(kubeClient kubernetes.Interface, namespace string, podName string, containerName string, totalWait time.Duration, result chan TestResult, successToken, failureToken string) {
+func SearchLogsForSuccess(kubeClient kubernetes.Interface, namespace string, podName string, containerName string, totalWait time.Duration, result chan string, successToken, failureToken string) {
 	sinceTime := metav1.NewTime(time.Now().Add(-PollLogsFromTimeSince))
 	options := &corev1.PodLogOptions{
 		Container: containerName,
@@ -124,7 +150,7 @@ func SearchLogsForSuccess(kubeClient kubernetes.Interface, namespace string, pod
 
 	go func() {
 		defer close(result)
-		defer logStream.Close()
+		defer logStream.Close() //nolint: errcheck,gosec
 		r := bufio.NewReader(logStream)
 		for {
 			line, err := r.ReadString('\n')
@@ -134,7 +160,7 @@ func SearchLogsForSuccess(kubeClient kubernetes.Interface, namespace string, pod
 			case time.Since(startedWaiting) >= totalWait:
 				result <- TestsTimedOut
 
-			// If we detect EOF before success - this must have bene a filure
+			// If we detect EOF before success - this must have been a failure
 			case err == io.EOF:
 				log.Error().Err(err).Msgf("EOF reading from pod %s/%s", namespace, podName)
 				result <- TestsFailed

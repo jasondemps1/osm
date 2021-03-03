@@ -1,63 +1,27 @@
 package main
 
 import (
-	"context"
-	"time"
+	"testing"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	testclient "k8s.io/client-go/kubernetes/fake"
-
-	"github.com/openservicemesh/osm/pkg/certificate"
-	"github.com/openservicemesh/osm/pkg/certificate/providers/tresor"
-	"github.com/openservicemesh/osm/pkg/constants"
+	tassert "github.com/stretchr/testify/assert"
 )
 
-var _ = Describe("Test creation of CA bundle k8s secret", func() {
-	Context("Testing createCABundleKubernetesSecret", func() {
-		It("creates a k8s secret", func() {
+func TestJoinURL(t *testing.T) {
+	assert := tassert.New(t)
+	type joinURLtest struct {
+		baseURL        string
+		path           string
+		expectedOutput string
+	}
+	joinURLtests := []joinURLtest{
+		{"http://foo", "/bar", "http://foo/bar"},
+		{"http://foo/", "/bar", "http://foo/bar"},
+		{"http://foo/", "bar", "http://foo/bar"},
+		{"http://foo", "bar", "http://foo/bar"},
+	}
 
-			cache := make(map[certificate.CommonName]certificate.Certificater)
-			certManager := tresor.NewFakeCertManager(&cache, 1*time.Hour)
-			secretName := "--secret--name--"
-			namespace := "--namespace--"
-			k8sClient := testclient.NewSimpleClientset()
-
-			err := createOrUpdateCABundleKubernetesSecret(k8sClient, certManager, namespace, secretName)
-			Expect(err).ToNot(HaveOccurred())
-
-			actual, err := k8sClient.CoreV1().Secrets(namespace).Get(context.Background(), secretName, v1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			expected := "-----BEGIN CERTIFICATE-----\nMIIF"
-			stringPEM := string(actual.Data[constants.KubernetesOpaqueSecretCAKey])[:len(expected)]
-			Expect(stringPEM).To(Equal(expected))
-
-			expectedRootCert, err := certManager.GetRootCertificate()
-			Expect(err).ToNot(HaveOccurred())
-			Expect(actual.Data[constants.KubernetesOpaqueSecretCAKey]).To(Equal(expectedRootCert.GetCertificateChain()))
-		})
-	})
-})
-
-var _ = Describe("Test joining of URL paths", func() {
-	It("should correctly join URL paths", func() {
-		final := joinURL("http://foo", "/bar")
-		Expect(final).To(Equal("http://foo/bar"))
-	})
-
-	It("should correctly join URL paths", func() {
-		final := joinURL("http://foo/", "/bar")
-		Expect(final).To(Equal("http://foo/bar"))
-	})
-
-	It("should correctly join URL paths", func() {
-		final := joinURL("http://foo/", "bar")
-		Expect(final).To(Equal("http://foo/bar"))
-	})
-
-	It("should correctly join URL paths", func() {
-		final := joinURL("http://foo", "bar")
-		Expect(final).To(Equal("http://foo/bar"))
-	})
-})
+	for _, ju := range joinURLtests {
+		result := joinURL(ju.baseURL, ju.path)
+		assert.Equal(result, ju.expectedOutput)
+	}
+}

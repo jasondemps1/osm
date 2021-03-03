@@ -2,20 +2,18 @@ package catalog
 
 import (
 	"context"
-	"time"
+	"testing"
+
+	. "github.com/onsi/ginkgo"
 
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-
+	tassert "github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
-	extensionsV1beta "k8s.io/api/extensions/v1beta1"
+	networkingV1beta1 "k8s.io/api/networking/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	testclient "k8s.io/client-go/kubernetes/fake"
 
-	"github.com/openservicemesh/osm/pkg/certificate"
 	"github.com/openservicemesh/osm/pkg/certificate/providers/tresor"
 	"github.com/openservicemesh/osm/pkg/configurator"
 	"github.com/openservicemesh/osm/pkg/constants"
@@ -35,13 +33,15 @@ var (
 
 	// fakeIngressPaths is a mapping of the fake ingress resource domains to its paths
 	fakeIngressPaths = map[string][]string{
-		"fake1.com": {"/fake1-path1", "/fake1-path2"},
+		"fake1.com": {"/fake1-path1", "/fake1-path2", "/fake1-path3"},
 		"fake2.com": {"/fake2-path1"},
 		"*":         {".*"},
 	}
 )
 
 func newFakeMeshCatalog() *MeshCatalog {
+	defer GinkgoRecover()
+
 	var (
 		mockCtrl           *gomock.Controller
 		mockKubeController *k8s.MockController
@@ -53,51 +53,62 @@ func newFakeMeshCatalog() *MeshCatalog {
 	mockIngressMonitor = ingress.NewMockMonitor(mockCtrl)
 
 	meshSpec := smi.NewFakeMeshSpecClient()
-	cache := make(map[certificate.CommonName]certificate.Certificater)
-	certManager := tresor.NewFakeCertManager(&cache, 1*time.Hour)
+
+	osmNamespace := "-test-osm-namespace-"
+	osmConfigMapName := "-test-osm-config-map-"
+
 	stop := make(chan struct{})
 	endpointProviders := []endpoint.Provider{
 		kube.NewFakeProvider(),
 	}
 	kubeClient := testclient.NewSimpleClientset()
 
-	// Create a pod
-	pod := tests.NewPodTestFixtureWithOptions(tests.Namespace, "pod-name", tests.BookstoreServiceAccountName)
+	cfg := configurator.NewConfigurator(kubeClient, stop, osmNamespace, osmConfigMapName)
+
+	certManager := tresor.NewFakeCertManager(cfg)
+
+	// Create a Bookstore-v1 pod
+	pod := tests.NewPodFixture(tests.Namespace, tests.BookstoreV1Service.Name, tests.BookstoreServiceAccountName, tests.PodLabels)
 	if _, err := kubeClient.CoreV1().Pods(tests.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{}); err != nil {
-		log.Fatal().Err(err).Msgf("Error creating new fake Mesh Catalog")
+		GinkgoT().Fatalf("Error creating new fake Mesh Catalog: %s", err.Error())
 	}
 
-	// Create Bookstore Service
+	// Create a Bookstore-v2 pod
+	pod = tests.NewPodFixture(tests.Namespace, tests.BookstoreV2Service.Name, tests.BookstoreV2ServiceAccountName, tests.PodLabels)
+	if _, err := kubeClient.CoreV1().Pods(tests.Namespace).Create(context.TODO(), &pod, metav1.CreateOptions{}); err != nil {
+		GinkgoT().Fatalf("Error creating new fake Mesh Catalog: %s", err.Error())
+	}
+
+	// Create Bookstore-v1 Service
 	selector := map[string]string{tests.SelectorKey: tests.SelectorValue}
-	svc := tests.NewServiceFixture(tests.BookstoreService.Name, tests.BookstoreService.Namespace, selector)
-	if _, err := kubeClient.CoreV1().Services(tests.BookstoreService.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
-		log.Fatal().Err(err).Msgf("Error creating new Bookstore service")
+	svc := tests.NewServiceFixture(tests.BookstoreV1Service.Name, tests.BookstoreV1Service.Namespace, selector)
+	if _, err := kubeClient.CoreV1().Services(tests.BookstoreV1Service.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
+		GinkgoT().Fatalf("Error creating new Bookstore service: %s", err.Error())
+	}
+
+	// Create Bookstore-v2 Service
+	svc = tests.NewServiceFixture(tests.BookstoreV2Service.Name, tests.BookstoreV2Service.Namespace, selector)
+	if _, err := kubeClient.CoreV1().Services(tests.BookstoreV2Service.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
+		GinkgoT().Fatalf("Error creating new Bookstore service: %s", err.Error())
 	}
 
 	// Create Bookbuyer Service
 	svc = tests.NewServiceFixture(tests.BookbuyerService.Name, tests.BookbuyerService.Namespace, nil)
 	if _, err := kubeClient.CoreV1().Services(tests.BookbuyerService.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
-		log.Fatal().Err(err).Msgf("Error creating new Bookbuyer service")
+		GinkgoT().Fatalf("Error creating new Bookbuyer service: %s", err.Error())
 	}
 
 	// Create Bookstore apex Service
 	svc = tests.NewServiceFixture(tests.BookstoreApexService.Name, tests.BookstoreApexService.Namespace, nil)
 	if _, err := kubeClient.CoreV1().Services(tests.BookstoreApexService.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
-		log.Fatal().Err(err).Msgf("Error creating new Bookstire Apex service")
+		GinkgoT().Fatalf("Error creating new Bookstore Apex service", err.Error())
 	}
 
-	osmNamespace := "-test-osm-namespace-"
-	osmConfigMapName := "-test-osm-config-map-"
-	cfg := configurator.NewConfigurator(kubeClient, stop, osmNamespace, osmConfigMapName)
-
-	testChan := make(chan interface{})
-
-	mockIngressMonitor.EXPECT().GetAnnouncementsChannel().Return(testChan).AnyTimes()
 	mockIngressMonitor.EXPECT().GetIngressResources(gomock.Any()).Return(getFakeIngresses(), nil).AnyTimes()
 
 	// Monitored namespaces is made a set to make sure we don't repeat namespaces on mock
 	listExpectedNs := tests.GetUnique([]string{
-		tests.BookstoreService.Namespace,
+		tests.BookstoreV1Service.Namespace,
 		tests.BookbuyerService.Namespace,
 		tests.BookstoreApexService.Namespace,
 	})
@@ -117,7 +128,7 @@ func newFakeMeshCatalog() *MeshCatalog {
 
 		return services
 	}).AnyTimes()
-	mockKubeController.EXPECT().GetService(gomock.Any()).DoAndReturn(func(msh service.MeshService) *v1.Service {
+	mockKubeController.EXPECT().GetService(gomock.Any()).DoAndReturn(func(msh service.MeshService) *corev1.Service {
 		// simulate lookup on controller cache
 		vv, err := kubeClient.CoreV1().Services(msh.Namespace).Get(context.TODO(), msh.Name, metav1.GetOptions{})
 
@@ -127,9 +138,8 @@ func newFakeMeshCatalog() *MeshCatalog {
 
 		return vv
 	}).AnyTimes()
-	mockKubeController.EXPECT().GetAnnouncementsChannel(k8s.Namespaces).Return(testChan).AnyTimes()
-	mockKubeController.EXPECT().GetAnnouncementsChannel(k8s.Services).Return(testChan).AnyTimes()
-	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookstoreService.Namespace).Return(true).AnyTimes()
+	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookstoreV1Service.Namespace).Return(true).AnyTimes()
+	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookstoreV2Service.Namespace).Return(true).AnyTimes()
 	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookbuyerService.Namespace).Return(true).AnyTimes()
 	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookwarehouseService.Namespace).Return(true).AnyTimes()
 	mockKubeController.EXPECT().ListMonitoredNamespaces().Return(listExpectedNs, nil).AnyTimes()
@@ -138,8 +148,8 @@ func newFakeMeshCatalog() *MeshCatalog {
 		mockIngressMonitor, stop, cfg, endpointProviders...)
 }
 
-func getFakeIngresses() []*extensionsV1beta.Ingress {
-	return []*extensionsV1beta.Ingress{
+func getFakeIngresses() []*networkingV1beta1.Ingress {
+	return []*networkingV1beta1.Ingress{
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "ingress-1",
@@ -148,23 +158,23 @@ func getFakeIngresses() []*extensionsV1beta.Ingress {
 					constants.OSMKubeResourceMonitorAnnotation: "enabled",
 				},
 			},
-			Spec: extensionsV1beta.IngressSpec{
-				Backend: &extensionsV1beta.IngressBackend{
+			Spec: networkingV1beta1.IngressSpec{
+				Backend: &networkingV1beta1.IngressBackend{
 					ServiceName: fakeIngressService,
 					ServicePort: intstr.IntOrString{
 						Type:   intstr.Int,
 						IntVal: fakeIngressPort,
 					},
 				},
-				Rules: []extensionsV1beta.IngressRule{
+				Rules: []networkingV1beta1.IngressRule{
 					{
 						Host: "fake1.com",
-						IngressRuleValue: extensionsV1beta.IngressRuleValue{
-							HTTP: &extensionsV1beta.HTTPIngressRuleValue{
-								Paths: []extensionsV1beta.HTTPIngressPath{
+						IngressRuleValue: networkingV1beta1.IngressRuleValue{
+							HTTP: &networkingV1beta1.HTTPIngressRuleValue{
+								Paths: []networkingV1beta1.HTTPIngressPath{
 									{
 										Path: "/fake1-path1",
-										Backend: extensionsV1beta.IngressBackend{
+										Backend: networkingV1beta1.IngressBackend{
 											ServiceName: fakeIngressService,
 											ServicePort: intstr.IntOrString{
 												Type:   intstr.Int,
@@ -174,7 +184,7 @@ func getFakeIngresses() []*extensionsV1beta.Ingress {
 									},
 									{
 										Path: "/fake1-path2",
-										Backend: extensionsV1beta.IngressBackend{
+										Backend: networkingV1beta1.IngressBackend{
 											ServiceName: fakeIngressService,
 											ServicePort: intstr.IntOrString{
 												Type:   intstr.Int,
@@ -198,16 +208,42 @@ func getFakeIngresses() []*extensionsV1beta.Ingress {
 					constants.OSMKubeResourceMonitorAnnotation: "enabled",
 				},
 			},
-			Spec: extensionsV1beta.IngressSpec{
-				Rules: []extensionsV1beta.IngressRule{
+			Spec: networkingV1beta1.IngressSpec{
+				Backend: &networkingV1beta1.IngressBackend{
+					ServiceName: fakeIngressService,
+					ServicePort: intstr.IntOrString{
+						Type:   intstr.Int,
+						IntVal: fakeIngressPort,
+					},
+				},
+				Rules: []networkingV1beta1.IngressRule{
 					{
 						Host: "fake2.com",
-						IngressRuleValue: extensionsV1beta.IngressRuleValue{
-							HTTP: &extensionsV1beta.HTTPIngressRuleValue{
-								Paths: []extensionsV1beta.HTTPIngressPath{
+						IngressRuleValue: networkingV1beta1.IngressRuleValue{
+							HTTP: &networkingV1beta1.HTTPIngressRuleValue{
+								Paths: []networkingV1beta1.HTTPIngressPath{
 									{
 										Path: "/fake2-path1",
-										Backend: extensionsV1beta.IngressBackend{
+										Backend: networkingV1beta1.IngressBackend{
+											ServiceName: fakeIngressService,
+											ServicePort: intstr.IntOrString{
+												Type:   intstr.Int,
+												IntVal: fakeIngressPort,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					{
+						Host: "fake1.com",
+						IngressRuleValue: networkingV1beta1.IngressRuleValue{
+							HTTP: &networkingV1beta1.HTTPIngressRuleValue{
+								Paths: []networkingV1beta1.HTTPIngressPath{
+									{
+										Path: "/fake1-path3",
+										Backend: networkingV1beta1.IngressBackend{
 											ServiceName: fakeIngressService,
 											ServicePort: intstr.IntOrString{
 												Type:   intstr.Int,
@@ -234,36 +270,71 @@ func pathContains(allowed []string, path string) bool {
 	return false
 }
 
-var _ = Describe("Test ingress route policies", func() {
-	Context("Testing GetIngressRoutesPerHost", func() {
-		mc := newFakeMeshCatalog()
-		It("Gets the route policies per domain from multiple ingress resources corresponding to a service", func() {
-			fakeService := service.MeshService{
-				Namespace: fakeIngressNamespace,
-				Name:      fakeIngressService,
-			}
+func TestGetIngressPoliciesForService(t *testing.T) {
+	assert := tassert.New(t)
+	mc := newFakeMeshCatalog()
+	fakeService := service.MeshService{
+		Namespace: fakeIngressNamespace,
+		Name:      fakeIngressService,
+	}
 
-			domainRoutesMap, _ := mc.GetIngressRoutesPerHost(fakeService)
+	inboundIngressPolicies, err := mc.GetIngressPoliciesForService(fakeService)
+	assert.Empty(err)
 
-			for domain, routePolicies := range domainRoutesMap {
-				// The number of route policies per domain is the product of the number of rules and paths per rule
-				Expect(len(routePolicies)).To(Equal(len(fakeIngressPaths[domain])))
-				for _, routePolicy := range routePolicies {
+	// The number of ingress inbound policies is the number of unique hosts across the ingress resources :
+	// 1. Hostnames: {"*"}
+	// 2. Hostnames: {"fake1.com"}
+	// 2. Hostnames: {"fake2.com"}
+	assert.Equal(len(inboundIngressPolicies), len(fakeIngressPaths))
 
-					// For each ingress path, all HTTP methods are allowed, which is a regex match all of '*'
-					Expect(len(routePolicy.Methods)).To(Equal(1))
+	for i := 0; i < len(inboundIngressPolicies); i++ {
+		for _, rule := range inboundIngressPolicies[i].Rules {
+			// For each ingress path, all HTTP methods are allowed, which is a regex match all of '*'
+			assert.Len(rule.Route.HTTPRouteMatch.Methods, 1)
+			assert.Equal(rule.Route.HTTPRouteMatch.Methods[0], constants.WildcardHTTPMethod)
 
-					Expect(routePolicy.Methods[0]).To(Equal(constants.RegexMatchAll))
+			//  rule.Route constains the path specified in the ingress resource rule. Since the same service
+			// could be a backend for multiple ingress resources, we don't know which ingress resource
+			// this path corresponds to. In order to not make assumptions
+			// on the implementation of 'GetIngressPoliciesForServices()', we relax the check here
+			// to match on any of the ingress paths corresponding to the host.
+			assert.True(pathContains(fakeIngressPaths[inboundIngressPolicies[i].Hostnames[0]], rule.Route.HTTPRouteMatch.PathRegex))
 
-					// routePolicy.Path is the path specified in the ingress resource rule. Since the same service
-					// could be a backend for multiple ingress resources, we don't know which ingress resource
-					// this path corresponds to just from 'domainRoutesMap'. In order to not make assumptions
-					// on the implementation of 'GetIngressRoutesPerHost()', we relax the check here
-					// to match on any of the ingress paths corresponding to the domain.
-					Expect(pathContains(fakeIngressPaths[domain], routePolicy.PathRegex)).To(BeTrue())
-				}
-			}
+			// Allowed service accounts should be wildcarded with an empty service account for ingress rules
+			assert.NotNil(rule.AllowedServiceAccounts)
+			assert.Equal(1, rule.AllowedServiceAccounts.Cardinality()) // single wildcard service account
+			allowedSvcAccounts := rule.AllowedServiceAccounts.Pop().(service.K8sServiceAccount)
+			assert.True((allowedSvcAccounts.IsEmpty()))
+		}
+	}
+}
+
+func TestBuildIngressPolicyName(t *testing.T) {
+	assert := tassert.New(t)
+	testCases := []struct {
+		name         string
+		namespace    string
+		host         string
+		expectedName string
+	}{
+		{
+			name:         "bookbuyer",
+			namespace:    "default",
+			host:         "*",
+			expectedName: "bookbuyer.default|*",
+		},
+		{
+			name:         "bookbuyer",
+			namespace:    "bookbuyer-ns",
+			host:         "foobar.com",
+			expectedName: "bookbuyer.bookbuyer-ns|foobar.com",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := buildIngressPolicyName(tc.name, tc.namespace, tc.host)
+			assert.Equal(tc.expectedName, actual)
 		})
-
-	})
-})
+	}
+}

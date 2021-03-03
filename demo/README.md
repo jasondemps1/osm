@@ -3,7 +3,7 @@
 ## System Requirements
 - MacOS, Linux or WSL2 on Windows
 - GCC
-- Go version 1.15 or higher
+- Go version [1.15.7 or higher](https://github.com/openservicemesh/osm/issues/2363)
 - Kubectl version 1.15 or higher
 - Docker CLI
    - on a Debian based GNU/Linux system: `sudo apt-get install docker`
@@ -32,6 +32,12 @@ From the root of this repository execute:
 ./demo/run-osm-demo.sh
 ```
 
+### Observability and tracing
+By default:
+-  Prometheus is not deployed by the demo script. To enable prometheus deployment, set the variable `DEPLOY_PROMETHEUS` in your `.env` file to `true`.
+- Grafana is not deployed by the demo script. To enable Grafana deployment, set the variable `DEPLOY_GRAFANA` in your `.env` file to `true`.
+- Jaegar is not deployed by the demo script. To enable Jaegar deployment, set the variable `DEPLOY_JAEGER` in your `.env` file to `true`.
+
 ### This script will:
   - compile OSM's control plane (`cmd/osm-controller`), create a separate container image and push it to the workstation's default container registry (See `~/.docker/config.json`)
   - build and push demo application images described below
@@ -43,7 +49,6 @@ From the root of this repository execute:
 	- `bookstore` is a service backed by two servers: `bookstore-v1` and `bookstore-v2`. Whenever either sells a book, it issues an HTTP `POST` request to the `bookwarehouse` to restock.
 
   - applies SMI traffic policies allowing `bookbuyer` to access `bookstore-v1` and `bookstore-v2`, while preventing `bookthief` from accessing the `bookstore` services
-  - installs Jaeger and points all Envoy pods to it
   - finally, a command indefinitely watches the relevant pods within the Kubernetes cluster
 
 
@@ -65,7 +70,7 @@ The Bookstore, Bookbuyer, and Bookthief apps have simple web UI visualizing the 
   - To see the UI for BookThief run `./scripts/port-forward-bookthief-ui.sh` and open [http://localhost:8083/](http://localhost:8083/)
   - To see Jaeger run `./scripts/port-forward-jaeger.sh` and open [http://localhost:16686/](http://localhost:16686/)
   - To see Grafana run `./scripts/port-forward-grafana.sh` and open [http://localhost:3000/](http://localhost:3000/) - default username and password for Grafana is `admin`/`admin`
-  - OSM controller has a simple debugging web endpoint - run `./scripts/port-forward-osm-debug.sh` and open [http://localhost:9091/debug](http://localhost:9091/debug)
+  - OSM controller has a simple debugging web endpoint - run `./scripts/port-forward-osm-debug.sh` and open [http://localhost:9092/debug](http://localhost:9092/debug)
 
 To expose web UI ports of all components of the service mesh the local workstation use the following helper script: `/scripts/port-forward-all.sh`
 

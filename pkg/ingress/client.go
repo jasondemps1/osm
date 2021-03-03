@@ -3,11 +3,12 @@ package ingress
 import (
 	"reflect"
 
-	extensionsV1beta "k8s.io/api/extensions/v1beta1"
+	networkingV1beta1 "k8s.io/api/networking/v1beta1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/openservicemesh/osm/pkg/announcements"
 	"github.com/openservicemesh/osm/pkg/configurator"
 	k8s "github.com/openservicemesh/osm/pkg/kubernetes"
 	"github.com/openservicemesh/osm/pkg/service"
@@ -16,13 +17,12 @@ import (
 // NewIngressClient implements ingress.Monitor and creates the Kubernetes client to monitor Ingress resources.
 func NewIngressClient(kubeClient kubernetes.Interface, kubeController k8s.Controller, stop chan struct{}, cfg configurator.Configurator) (Monitor, error) {
 	informerFactory := informers.NewSharedInformerFactory(kubeClient, k8s.DefaultKubeEventResyncInterval)
-	informer := informerFactory.Extensions().V1beta1().Ingresses().Informer()
+	informer := informerFactory.Networking().V1beta1().Ingresses().Informer()
 
 	client := Client{
 		informer:       informer,
 		cache:          informer.GetStore(),
 		cacheSynced:    make(chan interface{}),
-		announcements:  make(chan interface{}),
 		kubeController: kubeController,
 	}
 
@@ -30,7 +30,13 @@ func NewIngressClient(kubeClient kubernetes.Interface, kubeController k8s.Contro
 		ns := reflect.ValueOf(obj).Elem().FieldByName("ObjectMeta").FieldByName("Namespace").String()
 		return kubeController.IsMonitoredNamespace(ns)
 	}
-	informer.AddEventHandler(k8s.GetKubernetesEventHandlers("Ingress", "Kubernetes", client.announcements, shouldObserve))
+
+	ingrEventTypes := k8s.EventTypes{
+		Add:    announcements.IngressAdded,
+		Update: announcements.IngressUpdated,
+		Delete: announcements.IngressDeleted,
+	}
+	informer.AddEventHandler(k8s.GetKubernetesEventHandlers("Ingress", "Kubernetes", shouldObserve, ingrEventTypes))
 
 	if err := client.run(stop); err != nil {
 		log.Error().Err(err).Msg("Could not start Kubernetes Ingress client")
@@ -61,16 +67,11 @@ func (c *Client) run(stop <-chan struct{}) error {
 	return nil
 }
 
-// GetAnnouncementsChannel returns the announcement channel for the Ingress client
-func (c Client) GetAnnouncementsChannel() <-chan interface{} {
-	return c.announcements
-}
-
 // GetIngressResources returns the ingress resources whose backends correspond to the service
-func (c Client) GetIngressResources(meshService service.MeshService) ([]*extensionsV1beta.Ingress, error) {
-	var ingressResources []*extensionsV1beta.Ingress
+func (c Client) GetIngressResources(meshService service.MeshService) ([]*networkingV1beta1.Ingress, error) {
+	var ingressResources []*networkingV1beta1.Ingress
 	for _, ingressInterface := range c.cache.List() {
-		ingress, ok := ingressInterface.(*extensionsV1beta.Ingress)
+		ingress, ok := ingressInterface.(*networkingV1beta1.Ingress)
 		if !ok {
 			log.Error().Msg("Failed type assertion for Ingress in ingress cache")
 			continue

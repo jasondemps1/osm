@@ -1,3 +1,6 @@
+// Package health implements functionality for readiness and liveness health probes. The probes are served
+// by an HTTP server that exposes HTTP paths to probe on, with this package providing the necessary HTTP
+// handlers to respond to probe requests.
 package health
 
 import (
@@ -9,9 +12,6 @@ import (
 )
 
 var log = logger.New("health")
-
-// ProbeFunc is a type alias for a function that can be probed
-type ProbeFunc func() bool
 
 // Probes is the interface for liveness and readiness probes
 type Probes interface {
@@ -43,6 +43,9 @@ func (httpProbe HTTPProbe) Probe() (int, error) {
 	client := &http.Client{}
 
 	if httpProbe.Protocol == ProtocolHTTPS {
+		// Certificate validation is to be skipped for HTTPS probes
+		// similar to how k8s api server handles HTTPS probes.
+		// #nosec G402
 		transport := &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
@@ -59,7 +62,7 @@ func (httpProbe HTTPProbe) Probe() (int, error) {
 		return http.StatusServiceUnavailable, err
 	}
 
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint: errcheck,gosec
 	return resp.StatusCode, nil
 }
 
@@ -101,7 +104,7 @@ func LivenessHandler(probes []Probes, urlProbes []HTTPProbe) http.Handler {
 		// Probe on all configured probes
 		for _, probe := range probes {
 			if !probe.Liveness() {
-				msg := fmt.Sprintf("Libeness probe for %s indicates it is not alive", probe.GetID())
+				msg := fmt.Sprintf("Liveness probe for %s indicates it is not alive", probe.GetID())
 				log.Warn().Msgf(msg)
 				setProbeResponse(w, http.StatusServiceUnavailable, msg)
 				return

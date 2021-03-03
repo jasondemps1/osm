@@ -7,18 +7,15 @@ import (
 	"github.com/openservicemesh/osm/pkg/logger"
 )
 
-// TestResult is the type for the test result enum
-type TestResult int
-
 const (
 	// TestsPassed is used for tests that passed.
-	TestsPassed TestResult = iota + 1
+	TestsPassed = "passed"
 
 	// TestsFailed is used for tests that failed.
-	TestsFailed
+	TestsFailed = "failed"
 
 	// TestsTimedOut is used for tests that timed out.
-	TestsTimedOut
+	TestsTimedOut = "timedout"
 
 	// OSMNamespaceEnvVar is the environment variable for the OSM namespace.
 	OSMNamespaceEnvVar = "K8S_NAMESPACE"
@@ -31,9 +28,6 @@ const (
 
 	// BookstoreNamespaceEnvVar is the environment variable for the Bookbuyer namespace.
 	BookstoreNamespaceEnvVar = "BOOKSTORE_NAMESPACE"
-
-	// BookWarehouseNamespaceEnvVar is the environment variable for the BookWarehouse namespace.
-	BookWarehouseNamespaceEnvVar = "BOOKWAREHOUSE_NAMESPACE"
 
 	// WaitForPodTimeSecondsEnvVar is the environment variable for the time we will wait on the pod to be ready.
 	WaitForPodTimeSecondsEnvVar = "CI_MAX_WAIT_FOR_POD_TIME_SECONDS"
@@ -52,6 +46,6 @@ var (
 	// FailureLogsFromTimeSince is the interval we go back in time to get pod logs
 	FailureLogsFromTimeSince = 10 * time.Minute
 
-	log            = logger.New("ci/maestro")
+	log            = logger.NewPretty("ci/maestro")
 	errNoPodsFound = errors.New("no pods found")
 )

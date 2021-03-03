@@ -44,15 +44,15 @@ OSM runs an Envoy based control plane on Kubernetes, can be configured with SMI 
 ### Features
 
 1. Easily and transparently configure [traffic shifting][3] for deployments
-1. Secure service to service communication by [enabling mTLS](docs/patterns/certificates.md)
+1. Secure service to service communication by [enabling mTLS](docs/content/docs/tasks_usage/certificates.md)
 1. Define and execute fine grained [access control][4] policies for services
-1. [Observability](docs/patterns/observability.md) and insights into application metrics for debugging and monitoring services
-1. Integrate with [external certificate management](docs/patterns/certificates.md) services/solutions with a pluggable interface
-1. Onboard applications onto the mesh by enabling [automatic sidecar injection](docs/patterns/sidecar_injection.md) of Envoy proxy
+1. [Observability](docs/content/docs/patterns/observability/_index.md) and insights into application metrics for debugging and monitoring services
+1. Integrate with [external certificate management](docs/content/docs/tasks_usage/certificates.md) services/solutions with a pluggable interface
+1. Onboard applications onto the mesh by enabling [automatic sidecar injection](docs/content/docs/tasks_usage/sidecar_injection.md) of Envoy proxy
 
 ### Project status
 
-OSM is under active development and is **NOT** ready for production workloads. 
+OSM is under active development and is **NOT** ready for production workloads.
 
 ### Support
 
@@ -62,10 +62,10 @@ OSM is an open source project that is [**not** covered by the Microsoft Azure su
 
 |   Specification Component    |         Supported Release          |          Comments          |
 | :---------------------------- | :--------------------------------: |  :--------------------------------: |
-| Traffic Access Control  |  [v1alpha2](https://github.com/servicemeshinterface/smi-spec/blob/master/apis/traffic-access/v1alpha2/traffic-access.md)  | |
-| Traffic Specs  |  [v1alpha3](https://github.com/servicemeshinterface/smi-spec/blob/master/apis/traffic-specs/v1alpha3/traffic-specs.md)  | |
-| Traffic Split  |  [v1alpha2](https://github.com/servicemeshinterface/smi-spec/blob/master/apis/traffic-split/v1alpha2/traffic-split.md) | |
-| Traffic Metrics  | [v1alpha1](https://github.com/servicemeshinterface/smi-spec/blob/master/apis/traffic-metrics/v1alpha1/traffic-metrics.md) | 🚧 **In Progress** [#379](https://github.com/openservicemesh/osm/issues/379) 🚧 |
+| Traffic Access Control  |  [v1alpha3](https://github.com/servicemeshinterface/smi-spec/blob/v0.6.0/apis/traffic-access/v1alpha3/traffic-access.md)  | |
+| Traffic Specs  |  [v1alpha4](https://github.com/servicemeshinterface/smi-spec/blob/v0.6.0/apis/traffic-specs/v1alpha4/traffic-specs.md)  | |
+| Traffic Split  |  [v1alpha2](https://github.com/servicemeshinterface/smi-spec/blob/v0.6.0/apis/traffic-split/v1alpha2/traffic-split.md) | |
+| Traffic Metrics  | [v1alpha1](https://github.com/servicemeshinterface/smi-spec/blob/v0.6.0/apis/traffic-metrics/v1alpha1/traffic-metrics.md) | 🚧 **In Progress** [#379](https://github.com/openservicemesh/osm/issues/379) 🚧 |
 
 ## OSM Design
 
@@ -93,48 +93,48 @@ $ osm install
 ```
 ![OSM Install Demo](img/osm-install-demo-v0.2.0.gif "OSM Install Demo")
 
-See the [installation guide](docs/installation_guide.md) for more detailed options.
+See the [installation guide](docs/content/docs/install/_index.md) for more detailed options.
 
 ## Demos
-We have provided two demos for you to experience OSM. 
+We have provided two demos for you to experience OSM.
 
 - The [automated demo](demo/README.md) is a set of scripts anyone can run and shows how OSM can manage, secure and provide observability for microservice environments.
-- The [manual demo](docs/example/README.md) is a step-by-step walkthrough set of instruction of the automated demo.
+- The [manual demo](docs/content/docs/install/manual_demo/_index.md) is a step-by-step walkthrough set of instruction of the automated demo.
 
 ## Using OSM
 
-After installing OSM, [onboard a microservice application](docs/onboard_services.md) to the service mesh.
+After installing OSM, [onboard a microservice application](docs/content/docs/tasks_usage/onboard_services.md) to the service mesh.
 
 ### OSM Usage Patterns
 
-1. [Ingress](docs/patterns/ingress.md) and [Egress](docs/patterns/egress.md)
-1. [Observability](docs/patterns/observability.md)
-1. [Certificates](docs/patterns/certificates.md)
-1. [Sidecar Injection](docs/patterns/sidecar_injection.md)
+1. [Ingress](docs/content/docs/tasks_usage/ingress.md) and [Egress](docs/content/docs/tasks_usage/egress.md)
+1. [Observability](docs/content/docs/patterns/observability/_index.md)
+1. [Certificates](docs/content/docs/tasks_usage/certificates.md)
+1. [Sidecar Injection](docs/content/docs/tasks_usage/sidecar_injection.md)
 
 ## Community
 
 Connect with the Open Service Mesh community:
 
 - GitHub [issues](https://github.com/openservicemesh/osm/issues) and [pull requests](https://github.com/openservicemesh/osm/pulls) in this repo
-- OSM Slack (coming soon)
-- Public Community Call (coming soon)
+- OSM Slack: <a href="https://slack.cncf.io/">Join</a> the CNCF Slack for related discussions in <a href="https://cloud-native.slack.com/archives/C018794NV1C">#openservicemesh</a>
+- Public Community Call: OSM Community calls take place on the [second Tuesday of each month, 10:30am-11am Pacific](https://calendar.google.com/calendar?cid=Y181dXJwY3F0NWd2OW5ldXE2c2IxM2hvcnN2Z0Bncm91cC5jYWxlbmRhci5nb29nbGUuY29t) in the [CNCF OSM Zoom room](https://zoom.us/my/cncfosm?pwd=aXdkaGU3OWRjUllyaHZEZkh0ZjFwUT09) - notes available in [Open Service Mesh (OSM) Community Meeting Notes](https://docs.google.com/document/d/1da-XIqthmyG7zQyFAV1Kt-Qvq4NoNNBX7hZ_sM_kM98/edit?usp=sharing)
 - [Mailing list](https://groups.google.com/g/openservicemesh)
 
 ## Development Guide
 
-If you would like to contribute to OSM, check out the [development guide](docs/development_guide.md).
+If you would like to contribute to OSM, check out the [development guide](docs/content/docs/dev_guide/_index.md).
 
 ## Code of Conduct
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for further details.
+This project has adopted the [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/master/code-of-conduct.md). See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for further details.
 
 ## License
 
-This software is covered under the MIT license. You can read the license [here](LICENSE).
+This software is covered under the Apache 2.0 license. You can read the license [here](LICENSE).
 
 
 [1]: https://en.wikipedia.org/wiki/Service_mesh
 [2]: https://github.com/servicemeshinterface/smi-spec/blob/master/SPEC_LATEST_STABLE.md
-[3]: https://github.com/servicemeshinterface/smi-spec/blob/v0.5.0/apis/traffic-split/v1alpha2/traffic-split.md
-[4]: https://github.com/servicemeshinterface/smi-spec/blob/v0.5.0/apis/traffic-access/v1alpha2/traffic-access.md
+[3]: https://github.com/servicemeshinterface/smi-spec/blob/v0.6.0/apis/traffic-split/v1alpha2/traffic-split.md
+[4]: https://github.com/servicemeshinterface/smi-spec/blob/v0.6.0/apis/traffic-access/v1alpha3/traffic-access.md

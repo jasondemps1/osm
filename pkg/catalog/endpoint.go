@@ -1,8 +1,6 @@
 package catalog
 
 import (
-	"net"
-
 	"github.com/openservicemesh/osm/pkg/endpoint"
 	"github.com/openservicemesh/osm/pkg/service"
 )
@@ -23,36 +21,63 @@ func (mc *MeshCatalog) ListEndpointsForService(svc service.MeshService) ([]endpo
 
 // GetResolvableServiceEndpoints returns the resolvable set of endpoint over which a service is accessible using its FQDN
 func (mc *MeshCatalog) GetResolvableServiceEndpoints(svc service.MeshService) ([]endpoint.Endpoint, error) {
-	// TODO: Move the implmentation of this function to be provider-specific. Currently, the providers might
-	// not have access to some common structures in order to perform these operations in an optimal way
 	var endpoints []endpoint.Endpoint
-	var err error
+	for _, provider := range mc.endpointsProviders {
+		ep, err := provider.GetResolvableEndpointsForService(svc)
+		if err != nil {
+			log.Error().Err(err).Msgf("[%s] Error getting endpoints for Service %s", provider.GetID(), svc)
+			continue
+		}
+		if len(ep) == 0 {
+			log.Trace().Msgf("[%s] No endpoints found for service=%s", provider.GetID(), svc)
+			continue
+		}
+		endpoints = append(endpoints, ep...)
+	}
+	return endpoints, nil
+}
 
-	// Check if the service has been given Cluster IP
-	service := mc.kubeController.GetService(svc)
-	if service == nil {
-		log.Error().Msgf("Could not find service %s", svc.String())
-		return nil, errServiceNotFound
+// ListAllowedEndpointsForService returns only those endpoints for a service that belong to the allowed outbound service accounts
+// for the given downstream identity
+func (mc *MeshCatalog) ListAllowedEndpointsForService(downstreamIdentity service.K8sServiceAccount, upstreamSvc service.MeshService) ([]endpoint.Endpoint, error) {
+	outboundEndpoints, err := mc.ListEndpointsForService(upstreamSvc)
+	if err != nil {
+		log.Error().Err(err).Msgf("Error looking up endpoints for upstream service %s", upstreamSvc)
+		return nil, err
 	}
 
-	if len(service.Spec.ClusterIP) == 0 {
-		// If no cluster IP, use final endpoint as resolvable destinations
-		return mc.ListEndpointsForService(svc)
+	destSvcAccounts, err := mc.ListAllowedOutboundServiceAccounts(downstreamIdentity)
+	if err != nil {
+		log.Error().Err(err).Msgf("Error looking up outbound service accounts for downstream identity %s", downstreamIdentity)
+		return nil, err
 	}
 
-	// Cluster IP is present
-	ip := net.ParseIP(service.Spec.ClusterIP)
-	if ip == nil {
-		log.Error().Msgf("Could not parse Cluster IP %s", service.Spec.ClusterIP)
-		return nil, errParseClusterIP
+	// allowedEndpoints comprises of only those endpoints from outboundEndpoints that matches the endpoints from listEndpointsforIdentity
+	// i.e. only those interseting endpoints are taken into cosideration
+	var allowedEndpoints []endpoint.Endpoint
+	for _, destSvcAccount := range destSvcAccounts {
+		podEndpoints := mc.listEndpointsforIdentity(destSvcAccount)
+		for _, ep := range outboundEndpoints {
+			for _, podIP := range podEndpoints {
+				if ep.IP.Equal(podIP.IP) {
+					allowedEndpoints = append(allowedEndpoints, ep)
+				}
+			}
+		}
 	}
+	return allowedEndpoints, nil
+}
 
-	for _, svcPort := range service.Spec.Ports {
-		endpoints = append(endpoints, endpoint.Endpoint{
-			IP:   ip,
-			Port: endpoint.Port(svcPort.Port),
-		})
+// listEndpointsforIdentity retrieves the list of endpoints for the given service account
+func (mc *MeshCatalog) listEndpointsforIdentity(sa service.K8sServiceAccount) []endpoint.Endpoint {
+	var endpoints []endpoint.Endpoint
+	for _, provider := range mc.endpointsProviders {
+		ep := provider.ListEndpointsForIdentity(sa)
+		if len(ep) == 0 {
+			log.Trace().Msgf("[%s] No endpoints found for service account=%s", provider.GetID(), sa)
+			continue
+		}
+		endpoints = append(endpoints, ep...)
 	}
-
-	return endpoints, err
+	return endpoints
 }

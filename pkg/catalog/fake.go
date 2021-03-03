@@ -2,16 +2,13 @@ package catalog
 
 import (
 	"context"
-	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/onsi/ginkgo"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/openservicemesh/osm/pkg/certificate"
 	"github.com/openservicemesh/osm/pkg/certificate/providers/tresor"
 	"github.com/openservicemesh/osm/pkg/configurator"
 	"github.com/openservicemesh/osm/pkg/endpoint"
@@ -36,8 +33,7 @@ func NewFakeMeshCatalog(kubeClient kubernetes.Interface) *MeshCatalog {
 	mockIngressMonitor = ingress.NewMockMonitor(mockCtrl)
 
 	meshSpec := smi.NewFakeMeshSpecClient()
-	cache := make(map[certificate.CommonName]certificate.Certificater)
-	certManager := tresor.NewFakeCertManager(&cache, 1*time.Hour)
+
 	stop := make(<-chan struct{})
 	endpointProviders := []endpoint.Provider{
 		kube.NewFakeProvider(),
@@ -47,33 +43,36 @@ func NewFakeMeshCatalog(kubeClient kubernetes.Interface) *MeshCatalog {
 	osmConfigMapName := "-test-osm-config-map-"
 	cfg := configurator.NewConfigurator(kubeClient, stop, osmNamespace, osmConfigMapName)
 
-	testChan := make(chan interface{})
+	certManager := tresor.NewFakeCertManager(cfg)
 
 	mockIngressMonitor.EXPECT().GetIngressResources(gomock.Any()).Return(nil, nil).AnyTimes()
-	mockIngressMonitor.EXPECT().GetAnnouncementsChannel().Return(testChan).AnyTimes()
-
-	// Monitored namespaces is made a set to make sure we don't repeat namespaces on mock
-	listExpectedNs := tests.GetUnique([]string{
-		tests.BookstoreService.Namespace,
-		tests.BookbuyerService.Namespace,
-		tests.BookstoreApexService.Namespace,
-	})
 
 	// #1683 tracks potential improvements to the following dynamic mocks
 	mockKubeController.EXPECT().ListServices().DoAndReturn(func() []*corev1.Service {
 		// play pretend this call queries a controller cache
 		var services []*corev1.Service
 
-		for _, ns := range listExpectedNs {
-			svcList, _ := kubeClient.CoreV1().Services(ns).List(context.Background(), metav1.ListOptions{})
-			for _, svcItem := range svcList.Items {
-				services = append(services, &svcItem)
-			}
+		// This assumes that catalog tests use monitored namespaces at all times
+		svcList, _ := kubeClient.CoreV1().Services("").List(context.Background(), metav1.ListOptions{})
+		for idx := range svcList.Items {
+			services = append(services, &svcList.Items[idx])
 		}
 
 		return services
 	}).AnyTimes()
-	mockKubeController.EXPECT().GetService(gomock.Any()).DoAndReturn(func(msh service.MeshService) *v1.Service {
+	mockKubeController.EXPECT().ListServiceAccounts().DoAndReturn(func() []*corev1.ServiceAccount {
+		// play pretend this call queries a controller cache
+		var serviceAccounts []*corev1.ServiceAccount
+
+		// This assumes that catalog tests use monitored namespaces at all times
+		svcAccountList, _ := kubeClient.CoreV1().ServiceAccounts("").List(context.Background(), metav1.ListOptions{})
+		for idx := range svcAccountList.Items {
+			serviceAccounts = append(serviceAccounts, &svcAccountList.Items[idx])
+		}
+
+		return serviceAccounts
+	}).AnyTimes()
+	mockKubeController.EXPECT().GetService(gomock.Any()).DoAndReturn(func(msh service.MeshService) *corev1.Service {
 		// play pretend this call queries a controller cache
 		vv, err := kubeClient.CoreV1().Services(msh.Namespace).Get(context.Background(), msh.Name, metav1.GetOptions{})
 		if err != nil {
@@ -82,12 +81,26 @@ func NewFakeMeshCatalog(kubeClient kubernetes.Interface) *MeshCatalog {
 
 		return vv
 	}).AnyTimes()
-	mockKubeController.EXPECT().GetAnnouncementsChannel(k8s.Namespaces).Return(testChan).AnyTimes()
-	mockKubeController.EXPECT().GetAnnouncementsChannel(k8s.Services).Return(testChan).AnyTimes()
-	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookstoreService.Namespace).Return(true).AnyTimes()
+	mockKubeController.EXPECT().ListPods().DoAndReturn(func() []*corev1.Pod {
+		vv, err := kubeClient.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			return nil
+		}
+
+		var podRet []*corev1.Pod = []*corev1.Pod{}
+		for idx := range vv.Items {
+			podRet = append(podRet, &vv.Items[idx])
+		}
+		return podRet
+	}).AnyTimes()
+
+	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookstoreV1Service.Namespace).Return(true).AnyTimes()
+	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookstoreV2Service.Namespace).Return(true).AnyTimes()
 	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookbuyerService.Namespace).Return(true).AnyTimes()
 	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookwarehouseService.Namespace).Return(true).AnyTimes()
-	mockKubeController.EXPECT().GetAnnouncementsChannel(k8s.Namespaces).Return(testChan).AnyTimes()
+	mockKubeController.EXPECT().ListServiceAccountsForService(tests.BookstoreV1Service).Return([]service.K8sServiceAccount{tests.BookstoreServiceAccount}, nil).AnyTimes()
+	mockKubeController.EXPECT().ListServiceAccountsForService(tests.BookstoreV2Service).Return([]service.K8sServiceAccount{tests.BookstoreV2ServiceAccount}, nil).AnyTimes()
+	mockKubeController.EXPECT().ListServiceAccountsForService(tests.BookbuyerService).Return([]service.K8sServiceAccount{tests.BookbuyerServiceAccount}, nil).AnyTimes()
 
 	return NewMeshCatalog(mockKubeController, kubeClient, meshSpec, certManager,
 		mockIngressMonitor, stop, cfg, endpointProviders...)

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/openservicemesh/osm/pkg/cli"
 	"github.com/openservicemesh/osm/pkg/constants"
@@ -31,16 +32,16 @@ wide Kubernetes resources.
 
 The default Kubernetes namespace that gets created on install is called
 osm-system. To create an install control plane components in a different
-namespace, use the --namespace flag.
+namespace, use the global --osm-namespace flag.
 
 Example:
-  $ osm install --namespace hello-world
+  $ osm install --osm-namespace hello-world
 
 Multiple control plane installations can exist within a cluster. Each
 control plane is given a cluster-wide unqiue identifier called mesh name.
 A mesh name can be passed in via the --mesh-name flag. By default, the
 mesh-name name will be set to "osm." The mesh name must conform to same
-guidlines as a valid Kubernetes label value. Must be 63 characters or
+guidelines as a valid Kubernetes label value. Must be 63 characters or
 less and must be empty or begin and end with an alphanumeric character
 ([a-z0-9A-Z]) with dashes (-), underscores (_), dots (.), and
 alphanumerics between.
@@ -53,11 +54,32 @@ well as for adding a Kubernetes Namespace to the list of Namespaces a control
 plane should watch for sidecar injection of Envoy proxies.
 `
 const (
-	defaultCertManager         = "tresor"
-	defaultVaultProtocol       = "http"
-	defaultMeshName            = "osm"
-	defaultCertValidityMinutes = int(1440) // 24 hours
-	defaultOsmImagePullPolicy  = "IfNotPresent"
+	defaultCertificateManager            = "tresor"
+	defaultCertManagerIssuerGroup        = "cert-manager.io"
+	defaultCertManagerIssuerKind         = "Issuer"
+	defaultCertManagerIssuerName         = "osm-ca"
+	defaultChartPath                     = ""
+	defaultContainerRegistry             = "openservicemesh"
+	defaultContainerRegistrySecret       = ""
+	defaultMeshName                      = "osm"
+	defaultOsmImagePullPolicy            = "IfNotPresent"
+	defaultOsmImageTag                   = "v0.7.0"
+	defaultPrometheusRetentionTime       = constants.PrometheusDefaultRetentionTime
+	defaultVaultHost                     = ""
+	defaultVaultProtocol                 = "http"
+	defaultVaultToken                    = ""
+	defaultVaultRole                     = "openservicemesh"
+	defaultEnvoyLogLevel                 = "error"
+	defaultServiceCertValidityDuration   = "24h"
+	defaultEnableDebugServer             = false
+	defaultEnableEgress                  = false
+	defaultEnablePermissiveTrafficPolicy = false
+	defaultDeployPrometheus              = false
+	defaultEnablePrometheusScraping      = true
+	defaultDeployGrafana                 = false
+	defaultEnableFluentbit               = false
+	defaultDeployJaeger                  = false
+	defaultEnforceSingleMesh             = false
 )
 
 // chartTGZSource is a base64-encoded, gzipped tarball of the default Helm chart.
@@ -67,9 +89,9 @@ var chartTGZSource string
 type installCmd struct {
 	out                           io.Writer
 	certificateManager            string
-	certmanagerIssuerGroup        string
-	certmanagerIssuerKind         string
-	certmanagerIssuerName         string
+	certManagerIssuerGroup        string
+	certManagerIssuerKind         string
+	certManagerIssuerName         string
 	chartPath                     string
 	containerRegistry             string
 	containerRegistrySecret       string
@@ -82,26 +104,32 @@ type installCmd struct {
 	vaultToken                    string
 	vaultRole                     string
 	envoyLogLevel                 string
-	serviceCertValidityMinutes    int
+	serviceCertValidityDuration   string
+	timeout                       time.Duration
 	enableDebugServer             bool
 	enableEgress                  bool
 	enablePermissiveTrafficPolicy bool
-	meshCIDRRanges                []string
 	clientSet                     kubernetes.Interface
 	chartRequested                *chart.Chart
-
-	// This is an experimental flag, which will eventually
-	// become part of SMI Spec.
-	enableBackpressureExperimental bool
+	setOptions                    []string
 
 	// Toggle to enable/disable Prometheus installation
-	enablePrometheus bool
+	deployPrometheus bool
+
+	// Toggle to enable/disable Prometheus scraping
+	enablePrometheusScraping bool
 
 	// Toggle to enable/disable Grafana installation
-	enableGrafana bool
+	deployGrafana bool
+
+	// Toggle to enable/disable FluentBit sidecar
+	enableFluentbit bool
 
 	// Toggle this to enable/disable the automatic deployment of Jaeger
 	deployJaeger bool
+
+	// Toggle this to enforce only one mesh in this cluster
+	enforceSingleMesh bool
 }
 
 func newInstallCmd(config *helm.Configuration, out io.Writer) *cobra.Command {
@@ -116,12 +144,12 @@ func newInstallCmd(config *helm.Configuration, out io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			kubeconfig, err := settings.RESTClientGetter().ToRESTConfig()
 			if err != nil {
-				return errors.Errorf("Error fetching kubeconfig")
+				return errors.Errorf("Error fetching kubeconfig: %s", err)
 			}
 
 			clientset, err := kubernetes.NewForConfig(kubeconfig)
 			if err != nil {
-				return errors.Errorf("Could not access Kubernetes cluster. Check kubeconfig")
+				return errors.Errorf("Could not access Kubernetes cluster, check kubeconfig: %s", err)
 			}
 			inst.clientSet = clientset
 			return inst.run(config)
@@ -129,31 +157,34 @@ func newInstallCmd(config *helm.Configuration, out io.Writer) *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&inst.containerRegistry, "container-registry", "openservicemesh", "container registry that hosts control plane component images")
-	f.StringVar(&inst.chartPath, "osm-chart-path", "", "path to osm chart to override default chart")
-	f.StringVar(&inst.certificateManager, "certificate-manager", defaultCertManager, "certificate manager to use one of (tresor, vault, cert-manager)")
-	f.StringVar(&inst.osmImageTag, "osm-image-tag", "v0.3.0", "osm image tag")
+	f.StringVar(&inst.containerRegistry, "container-registry", defaultContainerRegistry, "container registry that hosts control plane component images")
+	f.StringVar(&inst.chartPath, "osm-chart-path", defaultChartPath, "path to osm chart to override default chart")
+	f.StringVar(&inst.certificateManager, "certificate-manager", defaultCertificateManager, "certificate manager to use one of (tresor, vault, cert-manager)")
+	f.StringVar(&inst.osmImageTag, "osm-image-tag", defaultOsmImageTag, "osm image tag")
 	f.StringVar(&inst.osmImagePullPolicy, "osm-image-pull-policy", defaultOsmImagePullPolicy, "osm image pull policy")
-	f.StringVar(&inst.containerRegistrySecret, "container-registry-secret", "", "name of Kubernetes secret for container registry credentials to be created if it doesn't already exist")
-	f.StringVar(&inst.vaultHost, "vault-host", "", "Hashicorp Vault host/service - where Vault is installed")
+	f.StringVar(&inst.containerRegistrySecret, "container-registry-secret", defaultContainerRegistrySecret, "name of Kubernetes secret for container registry credentials to be created if it doesn't already exist")
+	f.StringVar(&inst.vaultHost, "vault-host", defaultVaultHost, "Hashicorp Vault host/service - where Vault is installed")
 	f.StringVar(&inst.vaultProtocol, "vault-protocol", defaultVaultProtocol, "protocol to use to connect to Vault")
-	f.StringVar(&inst.vaultToken, "vault-token", "", "token that should be used to connect to Vault")
-	f.StringVar(&inst.vaultRole, "vault-role", "openservicemesh", "Vault role to be used by Open Service Mesh")
-	f.StringVar(&inst.certmanagerIssuerName, "cert-manager-issuer-name", "osm-ca", "cert-manager issuer name")
-	f.StringVar(&inst.certmanagerIssuerKind, "cert-manager-issuer-kind", "Issuer", "cert-manager issuer kind")
-	f.StringVar(&inst.certmanagerIssuerGroup, "cert-manager-issuer-group", "cert-manager.io", "cert-manager issuer group")
-	f.IntVar(&inst.serviceCertValidityMinutes, "service-cert-validity-minutes", defaultCertValidityMinutes, "Certificate TTL in minutes")
-	f.StringVar(&inst.prometheusRetentionTime, "prometheus-retention-time", constants.PrometheusDefaultRetentionTime, "Duration for which data will be retained in prometheus")
-	f.BoolVar(&inst.enableDebugServer, "enable-debug-server", false, "Enable the debug HTTP server")
-	f.BoolVar(&inst.enablePermissiveTrafficPolicy, "enable-permissive-traffic-policy", false, "Enable permissive traffic policy mode")
-	f.BoolVar(&inst.enableEgress, "enable-egress", false, "Enable egress in the mesh")
-	f.StringSliceVar(&inst.meshCIDRRanges, "mesh-cidr", []string{}, "mesh CIDR range, accepts multiple CIDRs, required if enable-egress option is true")
-	f.BoolVar(&inst.enableBackpressureExperimental, "enable-backpressure-experimental", false, "Enable experimental backpressure feature")
-	f.BoolVar(&inst.enablePrometheus, "enable-prometheus", true, "Enable Prometheus installation and deployment")
-	f.BoolVar(&inst.enableGrafana, "enable-grafana", false, "Enable Grafana installation and deployment")
+	f.StringVar(&inst.vaultToken, "vault-token", defaultVaultToken, "token that should be used to connect to Vault")
+	f.StringVar(&inst.vaultRole, "vault-role", defaultVaultRole, "Vault role to be used by Open Service Mesh")
+	f.StringVar(&inst.certManagerIssuerName, "cert-manager-issuer-name", defaultCertManagerIssuerName, "cert-manager issuer name")
+	f.StringVar(&inst.certManagerIssuerKind, "cert-manager-issuer-kind", defaultCertManagerIssuerKind, "cert-manager issuer kind")
+	f.StringVar(&inst.certManagerIssuerGroup, "cert-manager-issuer-group", defaultCertManagerIssuerGroup, "cert-manager issuer group")
+	f.StringVar(&inst.serviceCertValidityDuration, "service-cert-validity-duration", defaultServiceCertValidityDuration, "Service certificate validity duration, represented as a sequence of decimal numbers each with optional fraction and a unit suffix")
+	f.StringVar(&inst.prometheusRetentionTime, "prometheus-retention-time", defaultPrometheusRetentionTime, "Duration for which data will be retained in prometheus")
+	f.BoolVar(&inst.enableDebugServer, "enable-debug-server", defaultEnableDebugServer, "Enable the debug HTTP server")
+	f.BoolVar(&inst.enablePermissiveTrafficPolicy, "enable-permissive-traffic-policy", defaultEnablePermissiveTrafficPolicy, "Enable permissive traffic policy mode")
+	f.BoolVar(&inst.enableEgress, "enable-egress", defaultEnableEgress, "Enable egress in the mesh")
+	f.BoolVar(&inst.deployPrometheus, "deploy-prometheus", defaultDeployPrometheus, "Install and deploy Prometheus")
+	f.BoolVar(&inst.enablePrometheusScraping, "enable-prometheus-scraping", defaultEnablePrometheusScraping, "Enable Prometheus metrics scraping on sidecar proxies")
+	f.BoolVar(&inst.deployGrafana, "deploy-grafana", defaultDeployGrafana, "Install and deploy Grafana")
+	f.BoolVar(&inst.enableFluentbit, "enable-fluentbit", defaultEnableFluentbit, "Enable Fluentbit sidecar deployment")
 	f.StringVar(&inst.meshName, "mesh-name", defaultMeshName, "name for the new control plane instance")
-	f.BoolVar(&inst.deployJaeger, "deploy-jaeger", true, "Deploy Jaeger in the namespace of the OSM controller")
-	f.StringVar(&inst.envoyLogLevel, "envoy-log-level", "error", "Envoy log level is used to specify the level of logs collected from envoy and needs to be one of these (trace, debug, info, warning, warn, error, critical, off)")
+	f.BoolVar(&inst.deployJaeger, "deploy-jaeger", defaultDeployJaeger, "Deploy Jaeger in the namespace of the OSM controller")
+	f.StringVar(&inst.envoyLogLevel, "envoy-log-level", defaultEnvoyLogLevel, "Envoy log level is used to specify the level of logs collected from envoy and needs to be one of these (trace, debug, info, warning, warn, error, critical, off)")
+	f.BoolVar(&inst.enforceSingleMesh, "enforce-single-mesh", defaultEnforceSingleMesh, "Enforce only deploying one mesh in the cluster")
+	f.DurationVar(&inst.timeout, "timeout", 5*time.Minute, "Time to wait for installation and resources in a ready state, zero means no timeout")
+	f.StringArrayVar(&inst.setOptions, "set", nil, "Set arbitrary chart values not settable by another flag (can specify multiple or separate values with commas: key1=val1,key2=val2)")
 
 	return cmd
 }
@@ -173,6 +204,8 @@ func (i *installCmd) run(config *helm.Configuration) error {
 	installClient.ReleaseName = i.meshName
 	installClient.Namespace = settings.Namespace()
 	installClient.CreateNamespace = true
+	installClient.Atomic = true
+	installClient.Timeout = i.timeout
 	if _, err = installClient.Run(i.chartRequested, values); err != nil {
 		return err
 	}
@@ -197,6 +230,14 @@ func (i *installCmd) loadOSMChart() error {
 
 func (i *installCmd) resolveValues() (map[string]interface{}, error) {
 	finalValues := map[string]interface{}{}
+
+	for _, val := range i.setOptions {
+		// parses Helm strvals line and merges into a map for the final overrides for values.yaml
+		if err := strvals.ParseInto(val, finalValues); err != nil {
+			return nil, errors.Wrap(err, "invalid format for --set")
+		}
+	}
+
 	valuesConfig := []string{
 		fmt.Sprintf("OpenServiceMesh.image.registry=%s", i.containerRegistry),
 		fmt.Sprintf("OpenServiceMesh.image.tag=%s", i.osmImageTag),
@@ -206,21 +247,22 @@ func (i *installCmd) resolveValues() (map[string]interface{}, error) {
 		fmt.Sprintf("OpenServiceMesh.vault.protocol=%s", i.vaultProtocol),
 		fmt.Sprintf("OpenServiceMesh.vault.token=%s", i.vaultToken),
 		fmt.Sprintf("OpenServiceMesh.vault.role=%s", i.vaultRole),
-		fmt.Sprintf("OpenServiceMesh.certmanager.issuerName=%s", i.certmanagerIssuerName),
-		fmt.Sprintf("OpenServiceMesh.certmanager.issuerKind=%s", i.certmanagerIssuerKind),
-		fmt.Sprintf("OpenServiceMesh.certmanager.issuerGroup=%s", i.certmanagerIssuerGroup),
-		fmt.Sprintf("OpenServiceMesh.serviceCertValidityMinutes=%d", i.serviceCertValidityMinutes),
+		fmt.Sprintf("OpenServiceMesh.certmanager.issuerName=%s", i.certManagerIssuerName),
+		fmt.Sprintf("OpenServiceMesh.certmanager.issuerKind=%s", i.certManagerIssuerKind),
+		fmt.Sprintf("OpenServiceMesh.certmanager.issuerGroup=%s", i.certManagerIssuerGroup),
+		fmt.Sprintf("OpenServiceMesh.serviceCertValidityDuration=%s", i.serviceCertValidityDuration),
 		fmt.Sprintf("OpenServiceMesh.prometheus.retention.time=%s", i.prometheusRetentionTime),
 		fmt.Sprintf("OpenServiceMesh.enableDebugServer=%t", i.enableDebugServer),
 		fmt.Sprintf("OpenServiceMesh.enablePermissiveTrafficPolicy=%t", i.enablePermissiveTrafficPolicy),
-		fmt.Sprintf("OpenServiceMesh.enableBackpressureExperimental=%t", i.enableBackpressureExperimental),
-		fmt.Sprintf("OpenServiceMesh.enablePrometheus=%t", i.enablePrometheus),
-		fmt.Sprintf("OpenServiceMesh.enableGrafana=%t", i.enableGrafana),
+		fmt.Sprintf("OpenServiceMesh.deployPrometheus=%t", i.deployPrometheus),
+		fmt.Sprintf("OpenServiceMesh.enablePrometheusScraping=%t", i.enablePrometheusScraping),
+		fmt.Sprintf("OpenServiceMesh.deployGrafana=%t", i.deployGrafana),
+		fmt.Sprintf("OpenServiceMesh.enableFluentbit=%t", i.enableFluentbit),
 		fmt.Sprintf("OpenServiceMesh.meshName=%s", i.meshName),
 		fmt.Sprintf("OpenServiceMesh.enableEgress=%t", i.enableEgress),
-		fmt.Sprintf("OpenServiceMesh.meshCIDRRanges=%s", strings.Join(i.meshCIDRRanges, " ")),
 		fmt.Sprintf("OpenServiceMesh.deployJaeger=%t", i.deployJaeger),
 		fmt.Sprintf("OpenServiceMesh.envoyLogLevel=%s", strings.ToLower(i.envoyLogLevel)),
+		fmt.Sprintf("OpenServiceMesh.enforceSingleMesh=%t", i.enforceSingleMesh),
 	}
 
 	if i.containerRegistrySecret != "" {
@@ -233,6 +275,7 @@ func (i *installCmd) resolveValues() (map[string]interface{}, error) {
 			return nil, err
 		}
 	}
+
 	return finalValues, nil
 }
 
@@ -265,11 +308,11 @@ func (i *installCmd) validateOptions() error {
 	listOptions := metav1.ListOptions{
 		LabelSelector: labels.Set(labelSelector.MatchLabels).String(),
 	}
-	list, err := deploymentsClient.List(context.TODO(), listOptions)
+	osmControllerDeployments, err := deploymentsClient.List(context.TODO(), listOptions)
 	if err != nil {
 		return err
 	}
-	if len(list.Items) != 0 {
+	if len(osmControllerDeployments.Items) != 0 {
 		return errMeshAlreadyExists(i.meshName)
 	}
 
@@ -279,23 +322,48 @@ func (i *installCmd) validateOptions() error {
 	listOptions = metav1.ListOptions{
 		LabelSelector: labels.Set(labelSelector.MatchLabels).String(),
 	}
-	list, err = deploymentsClient.List(context.TODO(), listOptions)
-	if len(list.Items) != 0 {
+	osmControllerDeployments, err = deploymentsClient.List(context.TODO(), listOptions)
+	if osmControllerDeployments != nil && len(osmControllerDeployments.Items) > 0 {
 		return errNamespaceAlreadyHasController(settings.Namespace())
 	} else if err != nil {
 		return fmt.Errorf("Error ensuring no osm-controller running in namespace %s:%s", settings.Namespace(), err)
 	}
 
-	// validate CIDR ranges if egress is enabled
-	if i.enableEgress {
-		if err := validateCIDRs(i.meshCIDRRanges); err != nil {
-			return errors.Errorf("Invalid mesh-cidr-ranges: %q, error: %v. Valid mesh CIDR ranges must be specified with egress enabled.", i.meshCIDRRanges, err)
+	// validate the envoy log level type
+	if err := isValidEnvoyLogLevel(i.envoyLogLevel); err != nil {
+		return err
+	}
+
+	// validate certificate validity duration
+	if _, err := time.ParseDuration(i.serviceCertValidityDuration); err != nil {
+		return err
+	}
+
+	osmControllerDeployments, err = getControllerDeployments(i.clientSet)
+	if err != nil {
+		return err
+	}
+
+	// Check if single mesh cluster is already specified
+	for _, deployment := range osmControllerDeployments.Items {
+		singleMeshEnforced := deployment.ObjectMeta.Labels["enforceSingleMesh"] == "true"
+		name := deployment.ObjectMeta.Labels["meshName"]
+		if singleMeshEnforced {
+			return errors.Errorf("Cannot install mesh [%s]. Existing mesh [%s] enforces single mesh cluster.", i.meshName, name)
 		}
 	}
 
-	//validate the envoy log level type
-	if err := isValidEnvoyLogLevel(i.envoyLogLevel); err != nil {
-		return err
+	// Enforce single mesh cluster if needed
+	if i.enforceSingleMesh {
+		if len(osmControllerDeployments.Items) != 0 {
+			return errors.Errorf("Meshes already exist in cluster. Cannot enforce single mesh cluster.")
+		}
+	}
+
+	if i.deployPrometheus {
+		if !i.enablePrometheusScraping {
+			_, _ = fmt.Fprintf(i.out, "Prometheus scraping is disabled. To enable it, set prometheus_scraping in %s/%s to true.\n", settings.Namespace(), constants.OSMConfigMap)
+		}
 	}
 
 	return nil
@@ -320,24 +388,10 @@ func isValidMeshName(meshName string) error {
 	return nil
 }
 
-func validateCIDRs(cidrRanges []string) error {
-	if len(cidrRanges) == 0 {
-		return errors.Errorf("CIDR ranges cannot be empty when `enable-egress` option is true`")
-	}
-	for _, cidr := range cidrRanges {
-		cidrNoSpaces := strings.Replace(cidr, " ", "", -1)
-		_, _, err := net.ParseCIDR(cidrNoSpaces)
-		if err != nil {
-			return errors.Errorf("Error parsing CIDR %s", cidr)
-		}
-	}
-	return nil
-}
-
 func errMeshAlreadyExists(name string) error {
 	return errors.Errorf("Mesh %s already exists in cluster. Please specify a new mesh name using --mesh-name", name)
 }
 
 func errNamespaceAlreadyHasController(namespace string) error {
-	return errors.Errorf("Namespace %s has an osm controller. Please specify a new namespace using --namespace", namespace)
+	return errors.Errorf("Namespace %s has an osm controller. Please specify a new namespace using --osm-namespace", namespace)
 }

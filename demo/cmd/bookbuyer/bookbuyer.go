@@ -15,11 +15,11 @@ import (
 
 	"github.com/openservicemesh/osm/demo/cmd/common"
 	"github.com/openservicemesh/osm/pkg/logger"
+	"github.com/openservicemesh/osm/pkg/utils"
 )
 
 const (
 	participantName = "bookbuyer"
-	httpStatusOK    = "200"
 )
 
 var (
@@ -30,7 +30,7 @@ var (
 	log               = logger.NewPretty(participantName)
 	port              = flag.Int("port", 80, "port on which this app is listening for incoming HTTP")
 	path              = flag.String("path", ".", "path to the HTML template")
-	numConnectionsStr = common.GetEnv("CI_CLIENT_CONCURRENT_CONNECTIONS", "1")
+	numConnectionsStr = utils.GetEnv("CI_CLIENT_CONCURRENT_CONNECTIONS", "1")
 )
 
 type handler struct {
@@ -40,7 +40,7 @@ type handler struct {
 }
 
 func getIdentity() string {
-	return common.GetEnv("IDENTITY", "Bookbuyer")
+	return utils.GetEnv("IDENTITY", "Bookbuyer")
 }
 
 func renderTemplate(w http.ResponseWriter) {
@@ -85,7 +85,7 @@ func getHandlers() []handler {
 	}
 }
 
-func reset(w http.ResponseWriter, r *http.Request) {
+func reset(w http.ResponseWriter, _ *http.Request) {
 	atomic.StoreInt64(&booksBought, 0)
 	atomic.StoreInt64(&booksBoughtV1, 0)
 	atomic.StoreInt64(&booksBoughtV2, 0)
@@ -111,7 +111,7 @@ func main() {
 	// This is the bookbuyer.  When it tries to buy books from the bookstore - we expect it to see 200 responses.
 	for i := 0; i < numConnections; i++ {
 		wg.Add(1)
-		fmt.Printf("Backpressure: starting bookbuyer connection #%d", i)
+		fmt.Printf("Starting bookbuyer connection #%d", i)
 		go getBooksWrapper(&wg)
 	}
 

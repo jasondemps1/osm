@@ -36,7 +36,7 @@ OSM ships out-of-the-box with all necessary components to deploy a complete serv
 
 
 ## OSM Components & Interactions
-![OSM Components & Interactions](./docs/images/osm-components-and-interactions.png)
+![OSM Components & Interactions](./docs/content/images/osm-components-and-interactions.png)
 
 ### Containers
 When a new Pod creation is initiated, OSM's
@@ -81,6 +81,8 @@ Let's take a look at each component:
 ### (1) Proxy Control Plane
 The Proxy Control Plane plays a key part in operating the [service mesh](https://www.bing.com/search?q=What%27s+a+service+mesh%3F). All proxies are installed as [sidecars](https://docs.microsoft.com/en-us/azure/architecture/patterns/sidecar) and establish an mTLS gRPC connection to the Proxy Control Plane. The proxies continuously receive configuration updates. This component implements the interfaces required by the specific reverse proxy chosen. OSM implements [Envoy's go-control-plane xDS v3 API](https://github.com/envoyproxy/go-control-plane). The xDS v3 API can also be used to extend the functionality provided by SMI, when [advanced Envoy features are needed](https://github.com/openservicemesh/osm/issues/1376).
 
+The Proxy Control Plane's availability is of foremost importance when it comes to traffic policy enforcement and connectivity management between services. Some of the Control Plane design decisions are heavily influenced by that fact, such as its stateless nature. To read more on the design decisions behind the High Availability design of the Control Plane, please refer to the [HA design doc](/docs/content/docs/HA.md).
+
 ### (2) Certificate Manager
 Certificate Manager is a component that provides each service participating in the service mesh with a TLS certificate.
 These service certificates are used to establish and encrypt connections between services using mTLS.
@@ -107,9 +109,9 @@ This component:
 
 This section outlines the conventions adopted and guiding the development of the Open Service Mesh (OSM). Components discussed in this section:
   - (A) Proxy [sidecar](https://docs.microsoft.com/en-us/azure/architecture/patterns/sidecar) - Envoy or other reverse-proxy with service-mesh capabilities
-  - (B) [Proxy Certificate](#proxy-tls-certificate) - unique X.509 certificate issued to the specific proxy by the [Certificate Manager](#2-certificate-manager)
+  - (B) [Proxy Certificate](#b-proxy-tls-certificate) - unique X.509 certificate issued to the specific proxy by the [Certificate Manager](#2-certificate-manager)
   - (C) Service - [Kubernetes service resource](https://kubernetes.io/docs/concepts/services-networking/service/) referenced in SMI Spec
-  - (D) [Service Certificate](#service-tls-certificate) - X.509 certificate issued to the service
+  - (D) [Service Certificate](#d-service-tls-certificate) - X.509 certificate issued to the service
   - (E) Policy - [SMI Spec](https://smi-spec.io/) traffic policy enforced by the target service's proxy
   - Examples of service endpoints handling traffic for the given service:
     - (F) Azure VM - process running on an Azure VM, listening for connections on IP 1.2.3.11, port 81.
@@ -289,7 +291,7 @@ would require:
 
 In the previous section, we proposed implementation of the `StreamAggregatedResources` method. This provides
 connected Envoy proxies with a list of clusters, mapping of service name to list of routable IP addresses, list of permitted routes, listeners and secrets for CDS, EDS, RDS, LDS and SDS respectively.
-The `ListEndpointsForService`, `ListTrafficPolicies` and `GetCertificateForService` methods will be provided by the OSM component, which we refer to
+The `ListEndpointsForService` method will be provided by the OSM component, which we refer to
  as the **Mesh Catalog** in this document.
 
 The Mesh Catalog will have access to the `MeshSpec`, `CertificateManager`, and the list of `EndpointsProvider`s.
@@ -300,24 +302,20 @@ type MeshCataloger interface {
 	// GetSMISpec returns the SMI spec
 	GetSMISpec() smi.MeshSpec
 
-	// ListTrafficPolicies returns all the traffic policies for a given service that Envoy proxy should be aware of.
-	ListTrafficPolicies(service.MeshService) ([]trafficpolicy.TrafficTarget, error)
+	// ListAllowedInboundServiceAccounts lists the downstream service accounts that can connect to the given service account
+	ListAllowedInboundServiceAccounts(service.K8sServiceAccount) ([]service.K8sServiceAccount, error)
 
-	// ListAllowedInboundServices lists the inbound services allowed to connect to the given service.
-	ListAllowedInboundServices(service.MeshService) ([]service.MeshService, error)
+	// ListAllowedOutboundServiceAccounts lists the upstream service accounts the given service account can connect to
+	ListAllowedOutboundServiceAccounts(service.K8sServiceAccount) ([]service.K8sServiceAccount, error)
 
-	// ListAllowedOutboundServices lists the services the given service is allowed outbound connections to.
-	ListAllowedOutboundServices(service.MeshService) ([]service.MeshService, error)
+	// ListServiceAccountsForService lists the service accounts associated with the given service
+	ListServiceAccountsForService(service.MeshService) ([]service.K8sServiceAccount, error)
 
 	// ListSMIPolicies lists SMI policies.
-	ListSMIPolicies() ([]*split.TrafficSplit, []service.WeightedService, []service.K8sServiceAccount, []*spec.HTTPRouteGroup, []*target.TrafficTarget)
+	ListSMIPolicies() ([]*split.TrafficSplit, []service.K8sServiceAccount, []*spec.HTTPRouteGroup, []*target.TrafficTarget)
 
 	// ListEndpointsForService returns the list of provider endpoints corresponding to a service
 	ListEndpointsForService(service.MeshService) ([]endpoint.Endpoint, error)
-
-	// GetCertificateForService returns the SSL Certificate for the given service.
-	// This certificate will be used for service-to-service mTLS.
-	GetCertificateForService(service.MeshService) (certificate.Certificater, error)
 
 	// ExpectProxy catalogs the fact that a certificate was issued for an Envoy proxy and this is expected to connect to XDS.
 	ExpectProxy(certificate.CommonName)
@@ -335,14 +333,8 @@ type MeshCataloger interface {
 	// GetServicesForServiceAccount returns a list of services corresponding to a service account
 	GetServicesForServiceAccount(service.K8sServiceAccount) ([]service.MeshService, error)
 
-	// GetHostnamesForService returns the hostnames for a service
-	GetHostnamesForService(service service.MeshService) (string, error)
-
-	//GetWeightedClusterForService returns the weighted cluster for a service
-	GetWeightedClusterForService(service service.MeshService) (service.WeightedCluster, error)
-
-	// GetIngressRoutesPerHost returns the HTTP routes per host associated with an ingress service
-	GetIngressRoutesPerHost(service.MeshService) (map[string][]trafficpolicy.HTTPRoute, error)
+  // GetIngressPoliciesForService returns the inbound traffic policies associated with an ingress service
+  GetIngressPoliciesForService(service.MeshService) ([]*trafficpolicy.InboundTrafficPolicy, error)
 }
 ```
 
@@ -380,7 +372,7 @@ type Proxy struct {
 	certificate.CommonName
 	net.IP
 	ServiceName   service.MeshService
-	announcements chan interface{}
+	announcements chan announcements.Announcement
 
 	lastSentVersion    map[TypeURI]uint64
 	lastAppliedVersion map[TypeURI]uint64
@@ -395,7 +387,7 @@ participate in the service mesh. Each [endpoint provider](#3-endpoints-providers
 The [Mesh catalog](#5-mesh-catalog) will query each [Endpoints provider](#3-endpoints-providers) for a particular [service](#c-service), and obtain the IP addresses and ports of the endpoints handling traffic for service.
 
 The [Endpoints providers](#3-endpoints-providers) are aware of:
-  - Kubernetes Service and their own CRD (example: `AzureResource`)
+  - Kubernetes Service and their own CRD
   - vendor-specific APIs and methods to retrieve IP addresses and Port numbers for Endpoints
 
 The [Endpoints providers](#3-endpoints-providers) has no awareness of:
@@ -453,9 +445,6 @@ type MeshSpec interface {
 	// ListTrafficSplits lists SMI TrafficSplit resources
 	ListTrafficSplits() []*split.TrafficSplit
 
-	// ListTrafficSplitServices lists WeightedServices for the services specified in TrafficSplit SMI resources
-	ListTrafficSplitServices() []service.WeightedService
-
 	// ListServiceAccounts lists ServiceAccount resources specified in SMI TrafficTarget resources
 	ListServiceAccounts() []service.K8sServiceAccount
 
@@ -463,16 +452,16 @@ type MeshSpec interface {
 	GetService(service.MeshService) *corev1.Service
 
 	// ListServices Lists Kubernets Service resources that are part of monitored namespaces
-	ListServices() []*corev1.Service
+    ListServices() []*corev1.Service
+
+	// ListServiceAccounts Lists Kubernets Service Account resources that are part of monitored namespaces
+    ListServiceAccounts() []*corev1.ServiceAccounts
 
 	// ListHTTPTrafficSpecs lists SMI HTTPRouteGroup resources
 	ListHTTPTrafficSpecs() []*spec.HTTPRouteGroup
 
 	// ListTrafficTargets lists SMI TrafficTarget resources
 	ListTrafficTargets() []*target.TrafficTarget
-
-	// GetBackpressurePolicy fetches the Backpressure policy for the MeshService
-	GetBackpressurePolicy(service.MeshService) *backpressure.Backpressure
 
 	// GetAnnouncementsChannel returns the channel on which SMI client makes announcements
 	GetAnnouncementsChannel() <-chan interface{}
@@ -488,7 +477,7 @@ package certificate
 // Manager is the interface declaring the methods for the Certificate Manager.
 type Manager interface {
 	// IssueCertificate issues a new certificate.
-	IssueCertificate(CommonName, *time.Duration) (Certificater, error)
+	IssueCertificate(CommonName, time.Duration) (Certificater, error)
 
 	// GetCertificate returns a certificate given its Common Name (CN)
 	GetCertificate(CommonName) (Certificater, error)
@@ -501,6 +490,10 @@ type Manager interface {
 
 	// ListCertificates lists all certificates issued
 	ListCertificates() ([]Certificater, error)
+
+	// ReleaseCertificate informs the underlying certificate issuer that the given cert will no longer be needed.
+	// This method could be called when a given payload is terminated. Calling this should remove certs from cache and free memory if possible.
+	ReleaseCertificate(CommonName)
 
 	// GetAnnouncementsChannel returns a channel, which is used to announce when changes have been made to the issued certificates.
 	GetAnnouncementsChannel() <-chan interface{}
@@ -528,6 +521,9 @@ type Certificater interface {
 
 	// GetExpiration() returns the expiration of the certificate
 	GetExpiration() time.Time
+
+ 	// GetSerialNumber returns the serial number of the given certificate.
+ 	GetSerialNumber() string
 }
 ```
 
@@ -567,14 +563,6 @@ The following types are referenced in the interfaces proposed in this document:
       ```go
       // ClusterName is a type for a service name
       type ClusterName string
-      ```
-  -  WeightedService
-      ```go
-      //WeightedService is a struct of a service name and its weight
-      type WeightedService struct {
-	   ServiceName MeshService `json:"service_name:omitempty"`
-	   Weight      int               `json:"weight:omitempty"`
-      }
       ```
 
   -  RoutePolicy

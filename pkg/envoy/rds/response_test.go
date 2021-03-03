@@ -1,29 +1,29 @@
 package rds
 
 import (
-	"context"
 	"fmt"
-	"strings"
-	"time"
+	"testing"
 
 	set "github.com/deckarep/golang-set"
-	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	testclient "k8s.io/client-go/kubernetes/fake"
-
+	xds_route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/golang/mock/gomock"
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
+	proto "github.com/golang/protobuf/ptypes"
+	"github.com/golang/protobuf/ptypes/wrappers"
+	"github.com/google/uuid"
+	access "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/access/v1alpha3"
+	spec "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/specs/v1alpha4"
+	split "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/split/v1alpha2"
+	tassert "github.com/stretchr/testify/assert"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	testclient "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/openservicemesh/osm/pkg/catalog"
 	"github.com/openservicemesh/osm/pkg/certificate"
-	"github.com/openservicemesh/osm/pkg/certificate/providers/tresor"
 	"github.com/openservicemesh/osm/pkg/configurator"
 	"github.com/openservicemesh/osm/pkg/constants"
 	"github.com/openservicemesh/osm/pkg/endpoint"
-	"github.com/openservicemesh/osm/pkg/endpoint/providers/kube"
-	"github.com/openservicemesh/osm/pkg/ingress"
+	"github.com/openservicemesh/osm/pkg/envoy"
 	k8s "github.com/openservicemesh/osm/pkg/kubernetes"
 	"github.com/openservicemesh/osm/pkg/service"
 	"github.com/openservicemesh/osm/pkg/smi"
@@ -31,282 +31,505 @@ import (
 	"github.com/openservicemesh/osm/pkg/trafficpolicy"
 )
 
-const (
-	testHeaderKey1 = "test-header-1"
-	testHeaderKey2 = "test-header-2"
-)
+func TestNewResponse(t *testing.T) {
+	assert := tassert.New(t)
 
-var _ = Describe("Construct RoutePolicyWeightedClusters object", func() {
-	Context("Testing the creating of a RoutePolicyWeightedClusters object", func() {
-		It("Returns RoutePolicyWeightedClusters", func() {
-
-			weightedCluster := service.WeightedCluster{
-				ClusterName: service.ClusterName("osm/bookstore-1"),
-				Weight:      constants.ClusterWeightAcceptAll,
-			}
-			routePolicy := trafficpolicy.HTTPRoute{
-				PathRegex: "/books-bought",
-				Methods:   []string{"GET"},
-			}
-
-			routePolicyWeightedClusters := createRoutePolicyWeightedClusters(routePolicy, weightedCluster)
-			Expect(routePolicyWeightedClusters).NotTo(Equal(nil))
-			Expect(routePolicyWeightedClusters.HTTPRoute.PathRegex).To(Equal("/books-bought"))
-			Expect(routePolicyWeightedClusters.HTTPRoute.Methods).To(Equal([]string{"GET"}))
-			Expect(routePolicyWeightedClusters.WeightedClusters.Cardinality()).To(Equal(1))
-			routePolicyWeightedClustersSlice := routePolicyWeightedClusters.WeightedClusters.ToSlice()
-			Expect(string(routePolicyWeightedClustersSlice[0].(service.WeightedCluster).ClusterName)).To(Equal("osm/bookstore-1"))
-			Expect(routePolicyWeightedClustersSlice[0].(service.WeightedCluster).Weight).To(Equal(100))
-		})
-	})
-})
-
-var _ = Describe("AggregateRoutesByDomain", func() {
-	domainRoutesMap := make(map[string]map[string]trafficpolicy.RouteWeightedClusters)
-	weightedClustersMap := set.NewSet()
-	Context("Building a map of routes by domain", func() {
-		It("Returns a new aggregated map of domain and routes", func() {
-
-			weightedCluster := service.WeightedCluster{ClusterName: service.ClusterName("osm/bookstore-1"), Weight: 100}
-			routePolicies := []trafficpolicy.HTTPRoute{
-				{PathRegex: "/books-bought", Methods: []string{"GET"}},
-				{PathRegex: "/buy-a-book", Methods: []string{"GET"}},
-			}
-			weightedClustersMap.Add(weightedCluster)
-
-			for _, routePolicy := range routePolicies {
-				aggregateRoutesByHost(domainRoutesMap, routePolicy, weightedCluster, "bookstore.mesh")
-			}
-			Expect(domainRoutesMap).NotTo(Equal(nil))
-			Expect(len(domainRoutesMap)).To(Equal(1))
-			Expect(len(domainRoutesMap["bookstore.mesh"])).To(Equal(2))
-
-			for _, routePolicy := range routePolicies {
-				_, routePolicyExists := domainRoutesMap["bookstore.mesh"][routePolicy.PathRegex]
-				Expect(routePolicyExists).To(Equal(true))
-			}
-			for path := range domainRoutesMap["bookstore.mesh"] {
-				Expect(domainRoutesMap["bookstore.mesh"][path].WeightedClusters.Cardinality()).To(Equal(1))
-				Expect(domainRoutesMap["bookstore.mesh"][path].WeightedClusters.Equal(weightedClustersMap)).To(Equal(true))
-			}
-		})
-	})
-
-	Context("Adding a route to existing domain in the map", func() {
-		It("Returns the map of with a new route on the domain", func() {
-
-			weightedCluster := service.WeightedCluster{
-				ClusterName: service.ClusterName("osm/bookstore-1"),
-				Weight:      constants.ClusterWeightAcceptAll,
-			}
-			routePolicy := trafficpolicy.HTTPRoute{
-				PathRegex: "/update-books-bought",
-				Methods:   []string{"GET"},
-				Headers: map[string]string{
-					testHeaderKey1: "This is a test header 1",
+	testCases := []struct {
+		name                     string
+		downstreamSA             service.K8sServiceAccount
+		upstreamSA               service.K8sServiceAccount
+		upstreamServices         []service.MeshService
+		meshServices             []service.MeshService
+		trafficSpec              spec.HTTPRouteGroup
+		trafficSplit             split.TrafficSplit
+		ingressInboundPolicies   []*trafficpolicy.InboundTrafficPolicy
+		expectedInboundPolicies  []*trafficpolicy.InboundTrafficPolicy
+		expectedOutboundPolicies []*trafficpolicy.OutboundTrafficPolicy
+	}{
+		{
+			name:             "Test RDS NewResponse",
+			downstreamSA:     tests.BookbuyerServiceAccount,
+			upstreamSA:       tests.BookstoreServiceAccount,
+			upstreamServices: []service.MeshService{tests.BookstoreV1Service, tests.BookstoreV2Service},
+			meshServices:     []service.MeshService{tests.BookstoreV1Service, tests.BookstoreV2Service, tests.BookstoreApexService},
+			trafficSpec: spec.HTTPRouteGroup{
+				TypeMeta: v1.TypeMeta{
+					APIVersion: "specs.smi-spec.io/v1alpha4",
+					Kind:       "HTTPRouteGroup",
 				},
-			}
-			weightedClustersMap.Add(weightedCluster)
-
-			aggregateRoutesByHost(domainRoutesMap, routePolicy, weightedCluster, "bookstore.mesh")
-			Expect(domainRoutesMap).NotTo(Equal(nil))
-			Expect(len(domainRoutesMap)).To(Equal(1))
-			Expect(len(domainRoutesMap["bookstore.mesh"])).To(Equal(3))
-			Expect(domainRoutesMap["bookstore.mesh"][routePolicy.PathRegex].HTTPRoute).To(Equal(routePolicy))
-			Expect(domainRoutesMap["bookstore.mesh"][routePolicy.PathRegex].WeightedClusters.Cardinality()).To(Equal(1))
-			Expect(domainRoutesMap["bookstore.mesh"][routePolicy.PathRegex].HTTPRoute).To(Equal(trafficpolicy.HTTPRoute{PathRegex: "/update-books-bought", Methods: []string{"GET"}, Headers: map[string]string{testHeaderKey1: "This is a test header 1"}}))
-			Expect(domainRoutesMap["bookstore.mesh"][routePolicy.PathRegex].WeightedClusters.Equal(weightedClustersMap)).To(Equal(true))
-		})
-	})
-
-	Context("Adding a cluster to an existing route to existing domain in the map", func() {
-		It("Returns the map of with a new weighted cluster on a route in the domain", func() {
-
-			weightedCluster := service.WeightedCluster{
-				ClusterName: service.ClusterName("osm/bookstore-2"),
-				Weight:      constants.ClusterWeightAcceptAll,
-			}
-			routePolicy := trafficpolicy.HTTPRoute{
-				PathRegex: "/update-books-bought",
-				Methods:   []string{"GET"},
-				Headers: map[string]string{
-					testHeaderKey2: "This is a test header 2",
+				ObjectMeta: v1.ObjectMeta{
+					Namespace: tests.Namespace,
+					Name:      tests.RouteGroupName,
 				},
+				Spec: spec.HTTPRouteGroupSpec{
+					Matches: []spec.HTTPMatch{
+						{
+							Name:      tests.BuyBooksMatchName,
+							PathRegex: tests.BookstoreBuyPath,
+							Methods:   []string{"GET"},
+							Headers: map[string]string{
+								"user-agent": tests.HTTPUserAgent,
+							},
+						},
+						{
+							Name:      tests.SellBooksMatchName,
+							PathRegex: tests.BookstoreSellPath,
+							Methods:   []string{"GET"},
+							Headers: map[string]string{
+								"user-agent": tests.HTTPUserAgent,
+							},
+						},
+					},
+				},
+			},
+			trafficSplit: split.TrafficSplit{
+				ObjectMeta: v1.ObjectMeta{
+					Namespace: tests.Namespace,
+				},
+				Spec: split.TrafficSplitSpec{
+					Service: tests.BookstoreApexServiceName,
+					Backends: []split.TrafficSplitBackend{
+						{
+							Service: tests.BookstoreV1ServiceName,
+							Weight:  tests.Weight90,
+						},
+						{
+							Service: tests.BookstoreV2ServiceName,
+							Weight:  tests.Weight10,
+						},
+					},
+				},
+			},
+			ingressInboundPolicies: []*trafficpolicy.InboundTrafficPolicy{
+				{
+					Name:      "bookstore-v1-default-bookstore-v1.default.svc.cluster.local",
+					Hostnames: []string{"bookstore-v1.default.svc.cluster.local"},
+					Rules: []*trafficpolicy.Rule{
+						{
+							Route: trafficpolicy.RouteWeightedClusters{
+								HTTPRouteMatch: trafficpolicy.HTTPRouteMatch{
+									PathRegex: tests.BookstoreBuyPath,
+									Methods:   []string{constants.WildcardHTTPMethod},
+								},
+								WeightedClusters: set.NewSet(tests.BookstoreV1DefaultWeightedCluster),
+							},
+							AllowedServiceAccounts: set.NewSet(tests.BookstoreServiceAccount),
+						},
+					},
+				},
+				{
+					Name:      "bookstore-v1.default|*",
+					Hostnames: []string{"*"},
+					Rules: []*trafficpolicy.Rule{
+						{
+							Route: trafficpolicy.RouteWeightedClusters{
+								HTTPRouteMatch: trafficpolicy.HTTPRouteMatch{
+									PathRegex: tests.BookstoreBuyPath,
+									Methods:   []string{constants.WildcardHTTPMethod},
+								},
+								WeightedClusters: set.NewSet(tests.BookstoreV1DefaultWeightedCluster),
+							},
+							AllowedServiceAccounts: set.NewSet(tests.BookstoreServiceAccount),
+						},
+					},
+				},
+			},
+			expectedInboundPolicies: []*trafficpolicy.InboundTrafficPolicy{
+				{
+					Name: "bookstore-v1.default",
+					Hostnames: []string{
+						"bookstore-v1",
+						"bookstore-v1.default",
+						"bookstore-v1.default.svc",
+						"bookstore-v1.default.svc.cluster",
+						"bookstore-v1.default.svc.cluster.local",
+						"bookstore-v1:8888",
+						"bookstore-v1.default:8888",
+						"bookstore-v1.default.svc:8888",
+						"bookstore-v1.default.svc.cluster:8888",
+						"bookstore-v1.default.svc.cluster.local:8888",
+					},
+					Rules: []*trafficpolicy.Rule{
+						{
+							Route: trafficpolicy.RouteWeightedClusters{
+								HTTPRouteMatch: tests.BookstoreBuyHTTPRoute,
+								WeightedClusters: set.NewSet(service.WeightedCluster{
+									ClusterName: "default/bookstore-v1-local",
+									Weight:      100,
+								}),
+							},
+							AllowedServiceAccounts: set.NewSet(service.K8sServiceAccount{
+								Name:      tests.BookbuyerServiceAccountName,
+								Namespace: tests.Namespace,
+							}),
+						},
+						{
+							Route: trafficpolicy.RouteWeightedClusters{
+								HTTPRouteMatch: tests.BookstoreSellHTTPRoute,
+								WeightedClusters: set.NewSet(service.WeightedCluster{
+									ClusterName: "default/bookstore-v1-local",
+									Weight:      100,
+								}),
+							},
+							AllowedServiceAccounts: set.NewSet(service.K8sServiceAccount{
+								Name:      tests.BookbuyerServiceAccountName,
+								Namespace: tests.Namespace,
+							}),
+						},
+					},
+				},
+				{
+					Name: tests.BookstoreApexServiceName,
+					Hostnames: []string{
+						"bookstore-apex",
+						"bookstore-apex.default",
+						"bookstore-apex.default.svc",
+						"bookstore-apex.default.svc.cluster",
+						"bookstore-apex.default.svc.cluster.local",
+						"bookstore-apex:8888",
+						"bookstore-apex.default:8888",
+						"bookstore-apex.default.svc:8888",
+						"bookstore-apex.default.svc.cluster:8888",
+						"bookstore-apex.default.svc.cluster.local:8888",
+					},
+					Rules: []*trafficpolicy.Rule{
+						{
+							Route: trafficpolicy.RouteWeightedClusters{
+								HTTPRouteMatch: tests.BookstoreBuyHTTPRoute,
+								WeightedClusters: set.NewSet(service.WeightedCluster{
+									ClusterName: "default/bookstore-v1-local",
+									Weight:      100,
+								}),
+							},
+							AllowedServiceAccounts: set.NewSet(service.K8sServiceAccount{
+								Name:      tests.BookbuyerServiceAccountName,
+								Namespace: tests.Namespace,
+							}),
+						},
+						{
+							Route: trafficpolicy.RouteWeightedClusters{
+								HTTPRouteMatch: tests.BookstoreSellHTTPRoute,
+								WeightedClusters: set.NewSet(service.WeightedCluster{
+									ClusterName: "default/bookstore-v1-local",
+									Weight:      100,
+								}),
+							},
+							AllowedServiceAccounts: set.NewSet(service.K8sServiceAccount{
+								Name:      tests.BookbuyerServiceAccountName,
+								Namespace: tests.Namespace,
+							}),
+						},
+					},
+				},
+			},
+			expectedOutboundPolicies: []*trafficpolicy.OutboundTrafficPolicy{
+				{
+					Name:      tests.BookstoreApexServiceName,
+					Hostnames: tests.BookstoreApexHostnames,
+					Routes: []*trafficpolicy.RouteWeightedClusters{
+						{
+							HTTPRouteMatch: tests.WildCardRouteMatch,
+							WeightedClusters: set.NewSetFromSlice([]interface{}{
+								service.WeightedCluster{ClusterName: "default/bookstore-v1", Weight: 0},
+								service.WeightedCluster{ClusterName: "default/bookstore-v2", Weight: 100},
+							}),
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := gomock.NewController(t)
+			defer mockCtrl.Finish()
+
+			mockKubeController := k8s.NewMockController(mockCtrl)
+			mockMeshSpec := smi.NewMockMeshSpec(mockCtrl)
+			mockEndpointProvider := endpoint.NewMockProvider(mockCtrl)
+			mockConfigurator := configurator.NewMockConfigurator(mockCtrl)
+			mockCatalog := catalog.NewMockMeshCataloger(mockCtrl)
+			kubeClient := testclient.NewSimpleClientset()
+			proxy, err := getBookstoreV1Proxy(kubeClient)
+			assert.Nil(err)
+
+			for _, meshSvc := range tc.meshServices {
+				k8sService := tests.NewServiceFixture(meshSvc.Name, meshSvc.Namespace, map[string]string{})
+				mockKubeController.EXPECT().GetService(meshSvc).Return(k8sService).AnyTimes()
 			}
-			weightedClustersMap.Add(weightedCluster)
 
-			aggregateRoutesByHost(domainRoutesMap, routePolicy, weightedCluster, "bookstore.mesh")
-			Expect(domainRoutesMap).NotTo(Equal(nil))
-			Expect(len(domainRoutesMap)).To(Equal(1))
-			Expect(len(domainRoutesMap["bookstore.mesh"])).To(Equal(3))
-			Expect(domainRoutesMap["bookstore.mesh"][routePolicy.PathRegex].WeightedClusters.Cardinality()).To(Equal(2))
-			Expect(domainRoutesMap["bookstore.mesh"][routePolicy.PathRegex].HTTPRoute).To(Equal(trafficpolicy.HTTPRoute{PathRegex: "/update-books-bought", Methods: []string{"GET", "GET"}, Headers: map[string]string{testHeaderKey1: "This is a test header 1", testHeaderKey2: "This is a test header 2"}}))
-			Expect(domainRoutesMap["bookstore.mesh"][routePolicy.PathRegex].WeightedClusters.Equal(weightedClustersMap)).To(Equal(true))
+			mockEndpointProvider.EXPECT().GetID().Return("fake").AnyTimes()
+
+			mockMeshSpec.EXPECT().ListHTTPTrafficSpecs().Return([]*spec.HTTPRouteGroup{&tc.trafficSpec}).AnyTimes()
+			mockMeshSpec.EXPECT().ListTrafficSplits().Return([]*split.TrafficSplit{&tc.trafficSplit}).AnyTimes()
+			trafficTarget := tests.NewSMITrafficTarget(tc.downstreamSA.Name, tc.downstreamSA.Namespace, tc.upstreamSA.Name, tc.upstreamSA.Namespace)
+			mockMeshSpec.EXPECT().ListTrafficTargets().Return([]*access.TrafficTarget{&trafficTarget}).AnyTimes()
+
+			mockConfigurator.EXPECT().IsPermissiveTrafficPolicyMode().Return(false).AnyTimes()
+
+			mockCatalog.EXPECT().GetServicesFromEnvoyCertificate(gomock.Any()).Return([]service.MeshService{tests.BookstoreV1Service}, nil).AnyTimes()
+			mockCatalog.EXPECT().ListInboundTrafficPolicies(gomock.Any(), gomock.Any()).Return(tc.expectedInboundPolicies).AnyTimes()
+			mockCatalog.EXPECT().ListOutboundTrafficPolicies(gomock.Any()).Return(tc.expectedOutboundPolicies).AnyTimes()
+			mockCatalog.EXPECT().GetIngressPoliciesForService(gomock.Any()).Return(tc.ingressInboundPolicies, nil).AnyTimes()
+
+			actual, err := NewResponse(mockCatalog, proxy, nil, mockConfigurator, nil)
+			assert.Nil(err)
+			assert.NotNil(actual)
+
+			// The RDS response will have two route configurations
+			// 1. RDS_Inbound
+			// 2. RDS_Outbound
+			routeConfig := &xds_route.RouteConfiguration{}
+			assert.Equal(2, len(actual.GetResources()))
+
+			// Check the inbound route configuration
+			unmarshallErr := proto.UnmarshalAny(actual.GetResources()[0], routeConfig)
+			if err != nil {
+				t.Fatal(unmarshallErr)
+			}
+
+			// The RDS_Inbound will have the following virtual hosts :
+			// inbound_virtual-host|bookstore-v1.default
+			// inbound_virtual-host|bookstore-apex
+			// inbound_virtual-host|bookstore-v1.default|*
+			assert.Equal("RDS_Inbound", routeConfig.Name)
+			assert.Equal(3, len(routeConfig.VirtualHosts))
+
+			assert.Equal("inbound_virtual-host|bookstore-v1.default", routeConfig.VirtualHosts[0].Name)
+			assert.Equal(tests.BookstoreV1Hostnames, routeConfig.VirtualHosts[0].Domains)
+			assert.Equal(3, len(routeConfig.VirtualHosts[0].Routes))
+			assert.Equal(tests.BookstoreBuyHTTPRoute.PathRegex, routeConfig.VirtualHosts[0].Routes[0].GetMatch().GetSafeRegex().Regex)
+			assert.Equal(1, len(routeConfig.VirtualHosts[0].Routes[0].GetRoute().GetWeightedClusters().Clusters))
+			assert.Equal(routeConfig.VirtualHosts[0].Routes[0].GetRoute().GetWeightedClusters().TotalWeight, &wrappers.UInt32Value{Value: uint32(100)})
+			assert.Equal(tests.BookstoreSellHTTPRoute.PathRegex, routeConfig.VirtualHosts[0].Routes[1].GetMatch().GetSafeRegex().Regex)
+			assert.Equal(1, len(routeConfig.VirtualHosts[0].Routes[1].GetRoute().GetWeightedClusters().Clusters))
+			assert.Equal(routeConfig.VirtualHosts[0].Routes[1].GetRoute().GetWeightedClusters().TotalWeight, &wrappers.UInt32Value{Value: uint32(100)})
+			assert.Equal(tests.BookstoreBuyHTTPRoute.PathRegex, routeConfig.VirtualHosts[0].Routes[2].GetMatch().GetSafeRegex().Regex)
+			assert.Equal(1, len(routeConfig.VirtualHosts[0].Routes[2].GetRoute().GetWeightedClusters().Clusters))
+			assert.Equal(routeConfig.VirtualHosts[0].Routes[2].GetRoute().GetWeightedClusters().TotalWeight, &wrappers.UInt32Value{Value: uint32(100)})
+
+			assert.Equal("inbound_virtual-host|bookstore-apex", routeConfig.VirtualHosts[1].Name)
+			assert.Equal(tests.BookstoreApexHostnames, routeConfig.VirtualHosts[1].Domains)
+			assert.Equal(2, len(routeConfig.VirtualHosts[1].Routes))
+			assert.Equal(tests.BookstoreBuyHTTPRoute.PathRegex, routeConfig.VirtualHosts[1].Routes[0].GetMatch().GetSafeRegex().Regex)
+			assert.Equal(1, len(routeConfig.VirtualHosts[1].Routes[0].GetRoute().GetWeightedClusters().Clusters))
+			assert.Equal(routeConfig.VirtualHosts[1].Routes[0].GetRoute().GetWeightedClusters().TotalWeight, &wrappers.UInt32Value{Value: uint32(100)})
+			assert.Equal(tests.BookstoreSellHTTPRoute.PathRegex, routeConfig.VirtualHosts[1].Routes[1].GetMatch().GetSafeRegex().Regex)
+			assert.Equal(1, len(routeConfig.VirtualHosts[1].Routes[1].GetRoute().GetWeightedClusters().Clusters))
+			assert.Equal(routeConfig.VirtualHosts[1].Routes[1].GetRoute().GetWeightedClusters().TotalWeight, &wrappers.UInt32Value{Value: uint32(100)})
+
+			assert.Equal("inbound_virtual-host|bookstore-v1.default|*", routeConfig.VirtualHosts[2].Name)
+			assert.Equal([]string{"*"}, routeConfig.VirtualHosts[2].Domains)
+			assert.Equal(1, len(routeConfig.VirtualHosts[2].Routes))
+			assert.Equal(tests.BookstoreBuyHTTPRoute.PathRegex, routeConfig.VirtualHosts[2].Routes[0].GetMatch().GetSafeRegex().Regex)
+			assert.Equal(1, len(routeConfig.VirtualHosts[2].Routes[0].GetRoute().GetWeightedClusters().Clusters))
+			assert.Equal(routeConfig.VirtualHosts[2].Routes[0].GetRoute().GetWeightedClusters().TotalWeight, &wrappers.UInt32Value{Value: uint32(100)})
+
+			// Check the outbound route configuration
+			unmarshallErr = proto.UnmarshalAny(actual.GetResources()[1], routeConfig)
+			if err != nil {
+				t.Fatal(unmarshallErr)
+			}
+
+			// The RDS_Outbound will have the following virtual hosts :
+			// outbound_virtual-host|bookstore-apex
+			assert.Equal("RDS_Outbound", routeConfig.Name)
+			assert.Equal(1, len(routeConfig.VirtualHosts))
+
+			assert.Equal("outbound_virtual-host|bookstore-apex", routeConfig.VirtualHosts[0].Name)
+			assert.Equal(tests.BookstoreApexHostnames, routeConfig.VirtualHosts[0].Domains)
+			assert.Equal(1, len(routeConfig.VirtualHosts[0].Routes))
+			assert.Equal(tests.WildCardRouteMatch.PathRegex, routeConfig.VirtualHosts[0].Routes[0].GetMatch().GetSafeRegex().Regex)
+			assert.Equal(2, len(routeConfig.VirtualHosts[0].Routes[0].GetRoute().GetWeightedClusters().Clusters))
+			assert.Equal(routeConfig.VirtualHosts[0].Routes[0].GetRoute().GetWeightedClusters().TotalWeight, &wrappers.UInt32Value{Value: uint32(100)})
 		})
-	})
-})
+	}
+}
 
-var _ = Describe("RDS Response", func() {
-	var (
-		mockCtrl           *gomock.Controller
-		mockKubeController *k8s.MockController
-		mockIngressMonitor *ingress.MockMonitor
-	)
-	mockCtrl = gomock.NewController(GinkgoT())
-	mockKubeController = k8s.NewMockController(mockCtrl)
-	mockIngressMonitor = ingress.NewMockMonitor(mockCtrl)
-
-	endpointProviders := []endpoint.Provider{kube.NewFakeProvider()}
-	kubeClient := testclient.NewSimpleClientset()
-	cache := make(map[certificate.CommonName]certificate.Certificater)
-	certManager := tresor.NewFakeCertManager(&cache, 1*time.Hour)
-
-	stop := make(<-chan struct{})
-	osmNamespace := "-test-osm-namespace-"
-	osmConfigMapName := "-test-osm-config-map-"
-	cfg := configurator.NewConfigurator(kubeClient, stop, osmNamespace, osmConfigMapName)
-
-	testChan := make(chan interface{})
-
-	// Create Bookstore Service
-	selector := map[string]string{tests.SelectorKey: tests.SelectorValue}
-	svc := tests.NewServiceFixture(tests.BookstoreService.Name, tests.BookstoreService.Namespace, selector)
-	if _, err := kubeClient.CoreV1().Services(tests.BookstoreService.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
-		log.Fatal().Err(err).Msgf("Error creating new Bookstore service")
+func getBookstoreV1Proxy(kubeClient kubernetes.Interface) (*envoy.Proxy, error) {
+	// Create pod for bookbuyer
+	bookbuyerPodLabels := map[string]string{
+		tests.SelectorKey:                tests.BookbuyerService.Name,
+		constants.EnvoyUniqueIDLabelName: uuid.New().String(),
+	}
+	if _, err := tests.MakePod(kubeClient, tests.Namespace, tests.BookbuyerServiceName, tests.BookbuyerServiceAccountName, bookbuyerPodLabels); err != nil {
+		return nil, err
 	}
 
-	// Create Bookbuyer Service
-	svc = tests.NewServiceFixture(tests.BookbuyerService.Name, tests.BookbuyerService.Namespace, nil)
-	if _, err := kubeClient.CoreV1().Services(tests.BookbuyerService.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
-		log.Fatal().Err(err).Msgf("Error creating new Bookbuyer service")
+	// Create pod for bookstore-v1
+	bookstoreV1PodLabels := map[string]string{
+		tests.SelectorKey:                tests.BookstoreV1ServiceName,
+		constants.EnvoyUniqueIDLabelName: tests.ProxyUUID,
+	}
+	if _, err := tests.MakePod(kubeClient, tests.Namespace, tests.BookstoreV1ServiceName, tests.BookstoreServiceAccountName, bookstoreV1PodLabels); err != nil {
+		return nil, err
 	}
 
-	// Create Bookstore apex Service
-	svc = tests.NewServiceFixture(tests.BookstoreApexService.Name, tests.BookstoreApexService.Namespace, nil)
-	if _, err := kubeClient.CoreV1().Services(tests.BookstoreApexService.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
-		log.Fatal().Err(err).Msgf("Error creating new Bookstire Apex service")
+	// Create a pod for bookstore-v2
+	bookstoreV2PodLabels := map[string]string{
+		tests.SelectorKey:                tests.BookstoreV1ServiceName,
+		constants.EnvoyUniqueIDLabelName: uuid.New().String(),
+	}
+	if _, err := tests.MakePod(kubeClient, tests.Namespace, tests.BookstoreV2ServiceName, tests.BookstoreServiceAccountName, bookstoreV2PodLabels); err != nil {
+		return nil, err
 	}
 
-	mockIngressMonitor.EXPECT().GetIngressResources(gomock.Any()).Return(nil, nil).AnyTimes()
-	mockIngressMonitor.EXPECT().GetAnnouncementsChannel().Return(testChan).AnyTimes()
-
-	// Monitored namespaces is made a set to make sure we don't repeat namespaces on mock
-	listExpectedNs := tests.GetUnique([]string{
-		tests.BookstoreService.Namespace,
-		tests.BookbuyerService.Namespace,
-		tests.BookstoreApexService.Namespace,
-	})
-
-	mockKubeController.EXPECT().ListServices().DoAndReturn(func() []*corev1.Service {
-		// Play pretend this is in the controller cache
-		var services []*corev1.Service
-
-		for _, ns := range listExpectedNs {
-			svcList, _ := kubeClient.CoreV1().Services(ns).List(context.TODO(), metav1.ListOptions{})
-			for serviceIdx := range svcList.Items {
-				services = append(services, &svcList.Items[serviceIdx])
-			}
+	// Create service for bookstore-v1 and bookstore-v2
+	for _, svcName := range []string{tests.BookstoreV1ServiceName, tests.BookstoreV2ServiceName} {
+		selectors := map[string]string{
+			tests.SelectorKey: svcName,
 		}
-
-		return services
-	}).AnyTimes()
-	mockKubeController.EXPECT().GetService(gomock.Any()).DoAndReturn(func(msh service.MeshService) *v1.Service {
-		// Play pretend this is in the controller cache
-		vv, err := kubeClient.CoreV1().Services(msh.Namespace).Get(context.TODO(), msh.Name, metav1.GetOptions{})
-
-		if err != nil {
-			return nil
+		if _, err := tests.MakeService(kubeClient, svcName, selectors); err != nil {
+			return nil, err
 		}
+	}
 
-		return vv
-	}).AnyTimes()
-	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookstoreService.Namespace).Return(true).AnyTimes()
-	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookbuyerService.Namespace).Return(true).AnyTimes()
-	mockKubeController.EXPECT().IsMonitoredNamespace(tests.BookwarehouseService.Namespace).Return(true).AnyTimes()
-	mockKubeController.EXPECT().GetAnnouncementsChannel(k8s.Namespaces).Return(testChan).AnyTimes()
-	mockKubeController.EXPECT().GetAnnouncementsChannel(k8s.Services).Return(testChan).AnyTimes()
-	mockKubeController.EXPECT().ListMonitoredNamespaces().Return(listExpectedNs, nil).AnyTimes()
-
-	meshCatalog := catalog.NewMeshCatalog(mockKubeController, kubeClient, smi.NewFakeMeshSpecClient(), certManager,
-		mockIngressMonitor, make(<-chan struct{}), cfg, endpointProviders...)
-
-	Context("Test GetHostnamesForService", func() {
-		contains := func(domains []string, expected string) bool {
-			for _, entry := range domains {
-				if entry == expected {
-					return true
-				}
-			}
-			return false
+	// Create service for traffic split apex
+	for _, svcName := range []string{tests.BookstoreApexServiceName} {
+		selectors := map[string]string{
+			tests.SelectorKey: "bookstore",
 		}
-		It("returns the domain for a service when traffic split is specified for the given service", func() {
+		if _, err := tests.MakeService(kubeClient, svcName, selectors); err != nil {
+			return nil, err
+		}
+	}
 
-			actual, err := meshCatalog.GetHostnamesForService(tests.BookstoreService)
-			Expect(err).ToNot(HaveOccurred())
+	certCommonName := certificate.CommonName(fmt.Sprintf("%s.%s.%s", tests.ProxyUUID, tests.BookstoreServiceAccount, tests.Namespace))
+	certSerialNumber := certificate.SerialNumber("123456")
+	proxy := envoy.NewProxy(certCommonName, certSerialNumber, nil)
+	return proxy, nil
+}
 
-			domainList := strings.Split(actual, ",")
-			Expect(len(domainList)).To(Equal(10))
-			Expect(contains(domainList, tests.BookstoreApexServiceName)).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s:%d", tests.BookstoreApexServiceName, tests.ServicePort))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s", tests.BookstoreApexServiceName, tests.Namespace))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s:%d", tests.BookstoreApexServiceName, tests.Namespace, tests.ServicePort))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc", tests.BookstoreApexServiceName, tests.Namespace))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc:%d", tests.BookstoreApexServiceName, tests.Namespace, tests.ServicePort))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc.cluster", tests.BookstoreApexServiceName, tests.Namespace))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc.cluster:%d", tests.BookstoreApexServiceName, tests.Namespace, tests.ServicePort))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc.cluster.local", tests.BookstoreApexServiceName, tests.Namespace))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc.cluster.local:%d", tests.BookstoreApexServiceName, tests.Namespace, tests.ServicePort))).To(BeTrue())
-		})
+func TestNewResponseWithPermissiveMode(t *testing.T) {
+	assert := tassert.New(t)
 
-		It("returns a list of domains for a service when traffic split is not specified for the given service", func() {
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+	mockCatalog := catalog.NewMockMeshCataloger(mockCtrl)
+	mockConfigurator := configurator.NewMockConfigurator(mockCtrl)
 
-			actual, err := meshCatalog.GetHostnamesForService(tests.BookbuyerService)
-			Expect(err).ToNot(HaveOccurred())
+	uuid := uuid.New().String()
+	certCommonName := certificate.CommonName(fmt.Sprintf("%s.%s.%s.one.two.three.co.uk", uuid, "some-service", "some-namespace"))
+	certSerialNumber := certificate.SerialNumber("123456")
+	testProxy := envoy.NewProxy(certCommonName, certSerialNumber, nil)
 
-			domainList := strings.Split(actual, ",")
-			Expect(len(domainList)).To(Equal(10))
+	testPermissiveInbound := []*trafficpolicy.InboundTrafficPolicy{
+		{
+			Name:      "bookstore-v1.default",
+			Hostnames: tests.BookstoreV1Hostnames,
+			Rules: []*trafficpolicy.Rule{
+				{
+					Route: trafficpolicy.RouteWeightedClusters{
+						HTTPRouteMatch: trafficpolicy.HTTPRouteMatch{
+							PathRegex: constants.RegexMatchAll,
+							Methods:   []string{constants.WildcardHTTPMethod},
+						},
+						WeightedClusters: set.NewSet(tests.BookstoreV1DefaultWeightedCluster),
+					},
+					AllowedServiceAccounts: set.NewSet(tests.BookstoreServiceAccount),
+				},
+			},
+		},
+	}
 
-			Expect(contains(domainList, tests.BookbuyerServiceName)).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s:%d", tests.BookbuyerServiceName, tests.ServicePort))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s", tests.BookbuyerServiceName, tests.Namespace))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s:%d", tests.BookbuyerServiceName, tests.Namespace, tests.ServicePort))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc", tests.BookbuyerServiceName, tests.Namespace))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc:%d", tests.BookbuyerServiceName, tests.Namespace, tests.ServicePort))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc.cluster", tests.BookbuyerServiceName, tests.Namespace))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc.cluster:%d", tests.BookbuyerServiceName, tests.Namespace, tests.ServicePort))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc.cluster.local", tests.BookbuyerServiceName, tests.Namespace))).To(BeTrue())
-			Expect(contains(domainList, fmt.Sprintf("%s.%s.svc.cluster.local:%d", tests.BookbuyerServiceName, tests.Namespace, tests.ServicePort))).To(BeTrue())
-		})
+	testPermissiveOutbound := []*trafficpolicy.OutboundTrafficPolicy{
+		{
+			Name: "bookbuyer.default",
+			Hostnames: []string{
+				"bookbuyer.default",
+				"bookbuyer.default.svc",
+				"bookbuyer.default.svc.cluster",
+				"bookbuyer.default.svc.cluster.local",
+				"bookbuyer.default:8888",
+				"bookbuyer.default.svc:8888",
+				"bookbuyer.default.svc.cluster:8888",
+				"bookbuyer.default.svc.cluster.local:8888",
+			},
+			Routes: []*trafficpolicy.RouteWeightedClusters{
+				{
+					HTTPRouteMatch: trafficpolicy.HTTPRouteMatch{
+						PathRegex: constants.RegexMatchAll,
+						Methods:   []string{constants.WildcardHTTPMethod},
+					},
+					WeightedClusters: set.NewSet(tests.BookstoreV1DefaultWeightedCluster),
+				},
+			},
+		},
+	}
 
-		It("No service found when mesh does not have service", func() {
-			_, err := meshCatalog.GetHostnamesForService(tests.BookwarehouseService)
-			Expect(err).To(HaveOccurred())
-		})
-	})
+	testIngressInbound := []*trafficpolicy.InboundTrafficPolicy{
+		{
+			Name:      "bookstore-v1-default-bookstore-v1.default.svc.cluster.local",
+			Hostnames: []string{"bookstore-v1.default.svc.cluster.local"},
+			Rules: []*trafficpolicy.Rule{
+				{
+					Route: trafficpolicy.RouteWeightedClusters{
+						HTTPRouteMatch: trafficpolicy.HTTPRouteMatch{
+							PathRegex: tests.BookstoreBuyPath,
+							Methods:   []string{constants.WildcardHTTPMethod},
+						},
+						WeightedClusters: set.NewSet(tests.BookstoreV1DefaultWeightedCluster),
+					},
+					AllowedServiceAccounts: set.NewSet(tests.BookstoreServiceAccount),
+				},
+			},
+		},
+		{
+			Name:      "bookstore-v1.default|*",
+			Hostnames: []string{"*"},
+			Rules: []*trafficpolicy.Rule{
+				{
+					Route: trafficpolicy.RouteWeightedClusters{
+						HTTPRouteMatch: trafficpolicy.HTTPRouteMatch{
+							PathRegex: tests.BookstoreBuyPath,
+							Methods:   []string{constants.WildcardHTTPMethod},
+						},
+						WeightedClusters: set.NewSet(tests.BookstoreV1DefaultWeightedCluster),
+					},
+					AllowedServiceAccounts: set.NewSet(tests.BookstoreServiceAccount),
+				},
+			},
+		},
+	}
 
-	Context("GetWeightedClusterForService", func() {
-		It("returns weighted cluster for service from traffic split", func() {
+	mockCatalog.EXPECT().GetServicesFromEnvoyCertificate(gomock.Any()).Return([]service.MeshService{tests.BookstoreV1Service}, nil).AnyTimes()
+	mockCatalog.EXPECT().ListInboundTrafficPolicies(gomock.Any(), gomock.Any()).Return(testPermissiveInbound).AnyTimes()
+	mockCatalog.EXPECT().ListOutboundTrafficPolicies(gomock.Any()).Return(testPermissiveOutbound).AnyTimes()
+	mockCatalog.EXPECT().GetIngressPoliciesForService(gomock.Any()).Return(testIngressInbound, nil).AnyTimes()
 
-			actual, err := meshCatalog.GetWeightedClusterForService(tests.BookstoreService)
-			Expect(err).ToNot(HaveOccurred())
+	mockConfigurator.EXPECT().IsPermissiveTrafficPolicyMode().Return(true).AnyTimes()
 
-			expected := service.WeightedCluster{
-				ClusterName: service.ClusterName(tests.WeightedService.Service.String()),
-				Weight:      tests.WeightedService.Weight,
-			}
-			Expect(actual).To(Equal(expected))
-		})
+	actual, err := NewResponse(mockCatalog, testProxy, nil, mockConfigurator, nil)
+	assert.Nil(err)
 
-		It("returns weighted cluster for service with default weight of 100", func() {
+	routeConfig := &xds_route.RouteConfiguration{}
+	unmarshallErr := proto.UnmarshalAny(actual.GetResources()[0], routeConfig)
+	if err != nil {
+		t.Fatal(unmarshallErr)
+	}
+	assert.Equal("RDS_Inbound", routeConfig.Name)
+	assert.Equal(2, len(routeConfig.VirtualHosts))
 
-			actual, err := meshCatalog.GetWeightedClusterForService(tests.BookbuyerService)
-			Expect(err).ToNot(HaveOccurred())
+	assert.Equal("inbound_virtual-host|bookstore-v1.default", routeConfig.VirtualHosts[0].Name)
+	assert.Equal(tests.BookstoreV1Hostnames, routeConfig.VirtualHosts[0].Domains)
+	assert.Equal(2, len(routeConfig.VirtualHosts[0].Routes))
+	assert.Equal(constants.RegexMatchAll, routeConfig.VirtualHosts[0].Routes[0].GetMatch().GetSafeRegex().Regex)
+	assert.Equal(tests.BookstoreBuyHTTPRoute.PathRegex, routeConfig.VirtualHosts[0].Routes[1].GetMatch().GetSafeRegex().Regex)
 
-			expected := service.WeightedCluster{
-				ClusterName: service.ClusterName(tests.BookbuyerService.String()),
-				Weight:      tests.Weight,
-			}
-			Expect(actual).To(Equal(expected))
-		})
-	})
-})
+	assert.Equal("inbound_virtual-host|bookstore-v1.default|*", routeConfig.VirtualHosts[1].Name)
+	assert.Equal([]string{"*"}, routeConfig.VirtualHosts[1].Domains)
+	assert.Equal(1, len(routeConfig.VirtualHosts[1].Routes))
+	assert.Equal(tests.BookstoreBuyHTTPRoute.PathRegex, routeConfig.VirtualHosts[1].Routes[0].GetMatch().GetSafeRegex().Regex)
+
+	routeConfig = &xds_route.RouteConfiguration{}
+	unmarshallErr = proto.UnmarshalAny(actual.GetResources()[1], routeConfig)
+	if err != nil {
+		t.Fatal(unmarshallErr)
+	}
+	assert.Equal("RDS_Outbound", routeConfig.Name)
+	assert.Equal(1, len(routeConfig.VirtualHosts))
+
+	assert.Equal("outbound_virtual-host|bookbuyer.default", routeConfig.VirtualHosts[0].Name)
+	assert.Equal(1, len(routeConfig.VirtualHosts[0].Routes))
+	assert.Equal(constants.RegexMatchAll, routeConfig.VirtualHosts[0].Routes[0].GetMatch().GetSafeRegex().Regex)
+}

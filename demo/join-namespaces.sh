@@ -13,25 +13,37 @@ set -aueo pipefail
 source .env
 
 
-./bin/osm namespace add "${BOOKBUYER_NAMESPACE:-bookbuyer}"         --mesh-name "${MESH_NAME:-osm}" --enable-sidecar-injection
-./bin/osm namespace add "${BOOKSTORE_NAMESPACE:-bookstore}"         --mesh-name "${MESH_NAME:-osm}" --enable-sidecar-injection
-./bin/osm namespace add "${BOOKTHIEF_NAMESPACE:-bookthief}"         --mesh-name "${MESH_NAME:-osm}" --enable-sidecar-injection
-./bin/osm namespace add "${BOOKWAREHOUSE_NAMESPACE:-bookwarehouse}" --mesh-name "${MESH_NAME:-osm}" --enable-sidecar-injection
+./bin/osm namespace add "${BOOKBUYER_NAMESPACE:-bookbuyer}"         --mesh-name "${MESH_NAME:-osm}"
+./bin/osm namespace add "${BOOKSTORE_NAMESPACE:-bookstore}"         --mesh-name "${MESH_NAME:-osm}"
+./bin/osm namespace add "${BOOKTHIEF_NAMESPACE:-bookthief}"         --mesh-name "${MESH_NAME:-osm}"
+./bin/osm namespace add "${BOOKWAREHOUSE_NAMESPACE:-bookwarehouse}" --mesh-name "${MESH_NAME:-osm}"
 
 
+kubectl patch ConfigMap \
+        -n "${K8S_NAMESPACE}" osm-config \
+        --type merge \
+        --patch '{"data":{"permissive_traffic_policy_mode":"false"}}'
+
+
+# Create a top level service
+echo -e "Deploy bookstore Service"
 kubectl apply -f - <<EOF
 apiVersion: v1
-kind: ConfigMap
-
+kind: Service
 metadata:
-  name: osm-config
-  namespace: $K8S_NAMESPACE
-
-data:
-  permissive_traffic_policy_mode: "true"
-
+  labels:
+    app: bookstore
+  name: bookstore
+  namespace: bookstore
+spec:
+  ports:
+  - name: bookstore-port
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    app: bookstore
 EOF
-
 
 sleep 3
 

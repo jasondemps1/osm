@@ -58,10 +58,10 @@ func (r *CertRotor) checkAndRotate() {
 			// Remove the certificate from the cache of the certificate manager
 			newCert, err := r.certManager.RotateCertificate(cert.GetCommonName())
 			if err != nil {
-				log.Error().Err(err).Msgf("Error rotating cert CN=%s", cert.GetCommonName())
+				log.Error().Err(err).Msgf("Error rotating cert SerialNumber=%s", cert.GetSerialNumber())
 				continue
 			}
-			log.Trace().Msgf("Rotated cert CN=%s", newCert.GetCommonName())
+			log.Trace().Msgf("Rotated cert SerialNumber=%s", newCert.GetSerialNumber())
 		}
 	}
 }
@@ -72,7 +72,8 @@ func ShouldRotate(cert certificate.Certificater) bool {
 	// We want to renew earlier. How much earlier is defined in renewBeforeCertExpires.
 	// We add a few seconds noise to the early renew period so that certificates that may have been
 	// created at the same time are not renewed at the exact same time.
-	intNoise := rand.Intn(maxNoiseSeconds-minNoiseSeconds) + minNoiseSeconds
+
+	intNoise := rand.Intn(maxNoiseSeconds-minNoiseSeconds) + minNoiseSeconds /* #nosec G404 */
 	secondsNoise := time.Duration(intNoise) * time.Second
 	return time.Until(cert.GetExpiration()) <= (renewBeforeCertExpires + secondsNoise)
 }

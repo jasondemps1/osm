@@ -2,6 +2,7 @@ package ads
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	xds_discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -22,36 +23,46 @@ import (
 const ServerType = "ADS"
 
 // NewADSServer creates a new Aggregated Discovery Service server
-func NewADSServer(meshCatalog catalog.MeshCataloger, enableDebug bool, osmNamespace string, cfg configurator.Configurator) *Server {
+func NewADSServer(meshCatalog catalog.MeshCataloger, enableDebug bool, osmNamespace string, cfg configurator.Configurator, certManager certificate.Manager) *Server {
 	server := Server{
 		catalog: meshCatalog,
-		xdsHandlers: map[envoy.TypeURI]func(catalog.MeshCataloger, *envoy.Proxy, *xds_discovery.DiscoveryRequest, configurator.Configurator) (*xds_discovery.DiscoveryResponse, error){
+		xdsHandlers: map[envoy.TypeURI]func(catalog.MeshCataloger, *envoy.Proxy, *xds_discovery.DiscoveryRequest, configurator.Configurator, certificate.Manager) (*xds_discovery.DiscoveryResponse, error){
 			envoy.TypeEDS: eds.NewResponse,
 			envoy.TypeCDS: cds.NewResponse,
 			envoy.TypeRDS: rds.NewResponse,
 			envoy.TypeLDS: lds.NewResponse,
 			envoy.TypeSDS: sds.NewResponse,
 		},
-		enableDebug:  enableDebug,
-		osmNamespace: osmNamespace,
-		cfg:          cfg,
-	}
-
-	if enableDebug {
-		server.xdsLog = make(map[certificate.CommonName]map[envoy.TypeURI][]time.Time)
+		osmNamespace:   osmNamespace,
+		cfg:            cfg,
+		certManager:    certManager,
+		xdsMapLogMutex: sync.Mutex{},
+		xdsLog:         make(map[certificate.CommonName]map[envoy.TypeURI][]time.Time),
 	}
 
 	return &server
 }
 
+// withXdsLogMutex helper to run code that touches xdsLog map, to protect by mutex
+func (s *Server) withXdsLogMutex(f func()) {
+	s.xdsMapLogMutex.Lock()
+	defer s.xdsMapLogMutex.Unlock()
+	f()
+}
+
 // Start starts the ADS server
-func (s *Server) Start(ctx context.Context, cancel context.CancelFunc, port int, adsCert certificate.Certificater) {
-	grpcServer, lis := utils.NewGrpc(ServerType, port, adsCert.GetCertificateChain(), adsCert.GetPrivateKey(), adsCert.GetIssuingCA())
+func (s *Server) Start(ctx context.Context, cancel context.CancelFunc, port int, adsCert certificate.Certificater) error {
+	grpcServer, lis, err := utils.NewGrpc(ServerType, port, adsCert.GetCertificateChain(), adsCert.GetPrivateKey(), adsCert.GetIssuingCA())
+	if err != nil {
+		log.Error().Err(err).Msg("Error starting ADS server")
+		return err
+	}
+
 	xds_discovery.RegisterAggregatedDiscoveryServiceServer(grpcServer, s)
-
-	go utils.GrpcServe(ctx, grpcServer, lis, cancel, ServerType)
-
+	go utils.GrpcServe(ctx, grpcServer, lis, cancel, ServerType, nil)
 	s.ready = true
+
+	return nil
 }
 
 // DeltaAggregatedResources implements discovery.AggregatedDiscoveryServiceServer

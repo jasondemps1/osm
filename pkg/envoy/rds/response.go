@@ -1,81 +1,53 @@
 package rds
 
 import (
-	set "github.com/deckarep/golang-set"
-	xds_route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	xds_discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/golang/protobuf/ptypes"
 
 	"github.com/openservicemesh/osm/pkg/catalog"
+	"github.com/openservicemesh/osm/pkg/certificate"
 	"github.com/openservicemesh/osm/pkg/configurator"
 	"github.com/openservicemesh/osm/pkg/envoy"
 	"github.com/openservicemesh/osm/pkg/envoy/route"
-	"github.com/openservicemesh/osm/pkg/service"
 	"github.com/openservicemesh/osm/pkg/trafficpolicy"
 )
 
 // NewResponse creates a new Route Discovery Response.
-func NewResponse(catalog catalog.MeshCataloger, proxy *envoy.Proxy, _ *xds_discovery.DiscoveryRequest, _ configurator.Configurator) (*xds_discovery.DiscoveryResponse, error) {
-	svcList, err := catalog.GetServicesFromEnvoyCertificate(proxy.GetCommonName())
+func NewResponse(cataloger catalog.MeshCataloger, proxy *envoy.Proxy, _ *xds_discovery.DiscoveryRequest, cfg configurator.Configurator, _ certificate.Manager) (*xds_discovery.DiscoveryResponse, error) {
+	var inboundTrafficPolicies []*trafficpolicy.InboundTrafficPolicy
+	var outboundTrafficPolicies []*trafficpolicy.OutboundTrafficPolicy
+
+	proxyIdentity, err := catalog.GetServiceAccountFromProxyCertificate(proxy.GetCertificateCommonName())
 	if err != nil {
-		log.Error().Err(err).Msgf("Error looking up MeshService for Envoy with CN=%q", proxy.GetCommonName())
+		log.Error().Err(err).Msgf("Error looking up Service Account for Envoy with serial number=%q", proxy.GetCertificateSerialNumber())
 		return nil, err
 	}
-	// Github Issue #1575
-	proxyServiceName := svcList[0]
 
-	allTrafficPolicies, err := catalog.ListTrafficPolicies(proxyServiceName)
+	services, err := cataloger.GetServicesFromEnvoyCertificate(proxy.GetCertificateCommonName())
 	if err != nil {
-		log.Error().Err(err).Msg("Failed listing routes")
+		log.Error().Err(err).Msgf("Error looking up services for Envoy with serial number=%q", proxy.GetCertificateSerialNumber())
 		return nil, err
 	}
-	log.Debug().Msgf("trafficPolicies: %+v", allTrafficPolicies)
 
+	// Build traffic policies from  either SMI Traffic Target and Traffic Split or service discovery
+	// depending on whether permissive mode is enabled or not
+	inboundTrafficPolicies = cataloger.ListInboundTrafficPolicies(proxyIdentity, services)
+	outboundTrafficPolicies = cataloger.ListOutboundTrafficPolicies(proxyIdentity)
+
+	// Get Ingress inbound policies for the proxy
+	for _, svc := range services {
+		ingressInboundPolicies, err := cataloger.GetIngressPoliciesForService(svc)
+		if err != nil {
+			log.Error().Err(err).Msgf("Error looking up ingress policies for service=%s", svc.String())
+			return nil, err
+		}
+		inboundTrafficPolicies = trafficpolicy.MergeInboundPolicies(true, inboundTrafficPolicies, ingressInboundPolicies...)
+	}
+
+	routeConfiguration := route.BuildRouteConfiguration(inboundTrafficPolicies, outboundTrafficPolicies, proxy)
 	resp := &xds_discovery.DiscoveryResponse{
 		TypeUrl: string(envoy.TypeRDS),
 	}
-
-	var routeConfiguration []*xds_route.RouteConfiguration
-	outboundRouteConfig := route.NewRouteConfigurationStub(route.OutboundRouteConfigName)
-	inboundRouteConfig := route.NewRouteConfigurationStub(route.InboundRouteConfigName)
-	outboundAggregatedRoutesByHostnames := make(map[string]map[string]trafficpolicy.RouteWeightedClusters)
-	inboundAggregatedRoutesByHostnames := make(map[string]map[string]trafficpolicy.RouteWeightedClusters)
-
-	for _, trafficPolicy := range allTrafficPolicies {
-		isSourceService := trafficPolicy.Source.Equals(proxyServiceName)
-		isDestinationService := trafficPolicy.Destination.Equals(proxyServiceName)
-		svc := trafficPolicy.Destination
-		hostnames, err := catalog.GetHostnamesForService(svc)
-		if err != nil {
-			log.Error().Err(err).Msg("Failed listing domains")
-			return nil, err
-		}
-		weightedCluster, err := catalog.GetWeightedClusterForService(svc)
-		if err != nil {
-			log.Error().Err(err).Msg("Failed listing clusters")
-			return nil, err
-		}
-
-		// All routes from a given source to destination are part of 1 traffic policy between the source and destination.
-		for _, httpRoute := range trafficPolicy.HTTPRoutes {
-			if isSourceService {
-				aggregateRoutesByHost(outboundAggregatedRoutesByHostnames, httpRoute, weightedCluster, hostnames)
-			}
-
-			if isDestinationService {
-				aggregateRoutesByHost(inboundAggregatedRoutesByHostnames, httpRoute, weightedCluster, hostnames)
-			}
-		}
-	}
-
-	if err = updateRoutesForIngress(proxyServiceName, catalog, inboundAggregatedRoutesByHostnames); err != nil {
-		return nil, err
-	}
-
-	route.UpdateRouteConfiguration(outboundAggregatedRoutesByHostnames, outboundRouteConfig, route.OutboundRoute)
-	route.UpdateRouteConfiguration(inboundAggregatedRoutesByHostnames, inboundRouteConfig, route.InboundRoute)
-	routeConfiguration = append(routeConfiguration, outboundRouteConfig)
-	routeConfiguration = append(routeConfiguration, inboundRouteConfig)
 
 	for _, config := range routeConfiguration {
 		marshalledRouteConfig, err := ptypes.MarshalAny(config)
@@ -85,36 +57,6 @@ func NewResponse(catalog catalog.MeshCataloger, proxy *envoy.Proxy, _ *xds_disco
 		}
 		resp.Resources = append(resp.Resources, marshalledRouteConfig)
 	}
+
 	return resp, nil
-}
-
-func aggregateRoutesByHost(routesPerHost map[string]map[string]trafficpolicy.RouteWeightedClusters, routePolicy trafficpolicy.HTTPRoute, weightedCluster service.WeightedCluster, host string) {
-	_, exists := routesPerHost[host]
-	if !exists {
-		// no host found, create a new route map
-		routesPerHost[host] = make(map[string]trafficpolicy.RouteWeightedClusters)
-	}
-	routePolicyWeightedCluster, routeFound := routesPerHost[host][routePolicy.PathRegex]
-	if routeFound {
-		// add the cluster to the existing route
-		routePolicyWeightedCluster.WeightedClusters.Add(weightedCluster)
-		routePolicyWeightedCluster.HTTPRoute.Methods = append(routePolicyWeightedCluster.HTTPRoute.Methods, routePolicy.Methods...)
-		if routePolicyWeightedCluster.HTTPRoute.Headers == nil {
-			routePolicyWeightedCluster.HTTPRoute.Headers = make(map[string]string)
-		}
-		for headerKey, headerValue := range routePolicy.Headers {
-			routePolicyWeightedCluster.HTTPRoute.Headers[headerKey] = headerValue
-		}
-		routesPerHost[host][routePolicy.PathRegex] = routePolicyWeightedCluster
-	} else {
-		// no route found, create a new route and cluster mapping on host
-		routesPerHost[host][routePolicy.PathRegex] = createRoutePolicyWeightedClusters(routePolicy, weightedCluster)
-	}
-}
-
-func createRoutePolicyWeightedClusters(routePolicy trafficpolicy.HTTPRoute, weightedCluster service.WeightedCluster) trafficpolicy.RouteWeightedClusters {
-	return trafficpolicy.RouteWeightedClusters{
-		HTTPRoute:        routePolicy,
-		WeightedClusters: set.NewSet(weightedCluster),
-	}
 }

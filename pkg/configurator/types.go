@@ -1,6 +1,9 @@
+// Package configurator implements the Configurator interface that provides APIs to retrieve OSM control plane configurations.
 package configurator
 
 import (
+	"time"
+
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/openservicemesh/osm/pkg/logger"
@@ -14,7 +17,6 @@ var (
 type Client struct {
 	osmNamespace     string
 	osmConfigMapName string
-	announcements    chan interface{}
 	informer         cache.SharedIndexInformer
 	cache            cache.Store
 	cacheSynced      chan interface{}
@@ -34,6 +36,9 @@ type Configurator interface {
 	// IsEgressEnabled determines whether egress is globally enabled in the mesh or not
 	IsEgressEnabled() bool
 
+	// IsDebugServerEnabled determines whether osm debug HTTP server is enabled
+	IsDebugServerEnabled() bool
+
 	// IsPrometheusScrapingEnabled determines whether Prometheus is enabled for scraping metrics
 	IsPrometheusScrapingEnabled() bool
 
@@ -49,15 +54,18 @@ type Configurator interface {
 	// GetTracingEndpoint returns the collector endpoint
 	GetTracingEndpoint() string
 
-	// GetMeshCIDRRanges returns a list of mesh CIDR ranges
-	GetMeshCIDRRanges() []string
-
 	// UseHTTPSIngress determines whether protocol used for traffic from ingress to backend pods should be HTTPS.
 	UseHTTPSIngress() bool
 
 	// GetEnvoyLogLevel returns the envoy log level
 	GetEnvoyLogLevel() string
 
-	// GetAnnouncementsChannel returns a channel, which is used to announce when changes have been made to the OSM ConfigMap
-	GetAnnouncementsChannel() <-chan interface{}
+	// GetServiceCertValidityPeriod returns the validity duration for service certificates
+	GetServiceCertValidityPeriod() time.Duration
+
+	// GetOutboundIPRangeExclusionList returns the list of IP ranges of the form x.x.x.x/y to exclude from outbound sidecar interception
+	GetOutboundIPRangeExclusionList() []string
+
+	// IsPrivilegedInitContainer determines whether init containers should be privileged
+	IsPrivilegedInitContainer() bool
 }

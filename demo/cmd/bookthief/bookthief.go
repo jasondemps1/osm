@@ -12,11 +12,11 @@ import (
 
 	"github.com/openservicemesh/osm/demo/cmd/common"
 	"github.com/openservicemesh/osm/pkg/logger"
+	"github.com/openservicemesh/osm/pkg/utils"
 )
 
 const (
 	participantName    = "bookthief"
-	httpStatusOK       = "200"
 	httpStatusNotFound = "404"
 )
 
@@ -46,7 +46,7 @@ func renderTemplate(w http.ResponseWriter) {
 	}
 }
 func getIdentity() string {
-	return common.GetEnv("IDENTITY", "Bookthief")
+	return utils.GetEnv("IDENTITY", "Bookthief")
 }
 
 type handler struct {
@@ -67,7 +67,7 @@ func getHandlers() []handler {
 	}
 }
 
-func reset(w http.ResponseWriter, r *http.Request) {
+func reset(w http.ResponseWriter, _ *http.Request) {
 	booksStolen = 0
 	booksStolenV1 = 0
 	booksStolenV2 = 0
@@ -95,7 +95,7 @@ func main() {
 	// the HTTP response status code will differ for in-mesh requests.
 	//
 	// Expected response code when bookthief tries to buy books from the bookstore:
-	// 1. With SMI policies: 404
+	// 1. With SMI policies: 0
 	// 2. With permissive traffic policy: 200
 	//
 	// When it tries to make an egress request, we expect a 200 response with egress enabled and a 404 response with egress disabled.
